@@ -1,6 +1,6 @@
 # 技術スタック定義書
 
-最終更新: 2026-05-20
+最終更新: 2026-05-21
 
 > 本書は4DGaussians環境構築の技術スタックを定義する。確定していない項目は「未検証」と明記し、環境構築フェーズで決定・更新する。
 
@@ -49,6 +49,8 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 ---
 
 ## コア依存関係（公式 `requirements.txt`）
+
+> 本表は主要ライブラリの**用途・選定理由・バージョン方針**（なぜ）を示すキュレーション記録。実際に導入された版の正本は `requirements.lock.txt`（後述「uv 依存管理ルール」参照）であり、本表はその全量ではない。
 
 | ライブラリ名 | バージョン要件 | 用途 | 備考 |
 |-------------|--------------|------|------|
@@ -141,6 +143,27 @@ CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
 ```
 
 > 上記は方針スケッチ。確定コマンド（`requirements.txt` 内のtorch指定との競合回避、ビルド時の環境変数の永続化方法等）はfeat-001/feat-002の設計書で定める。
+
+---
+
+## uv 依存管理ルール（環境破壊の防止）
+
+> **背景**: ViTPose環境で、`uv pip install` で命令的に構築した環境に対し、依存を完全宣言していない `pyproject.toml` に1パッケージだけ足して `uv sync` を実行した結果、未宣言の主要依存（mmpose / mmcv-full / timm / mmdet / ultralytics 等）が「余分」として一括削除され、環境が破壊された。同型事故を防ぐため本プロジェクトでは以下を厳守する。
+
+1. **`uv sync` / `uv pip sync` を使わない**。これらは「宣言（`pyproject.toml`+`uv.lock`、または requirements ファイル）に無いパッケージを削除」する剪定動作のため、ソースビルドのCUDA拡張・editable・特殊indexのtorchを巻き込んで壊す。パッケージ追加は常に **`uv pip install`**（追加的・非破壊）で行う。
+2. **`pyproject.toml` を作らない**。無ければ `uv sync` は実行できず（エラー）、事故が構造的に起きない。torch の CUDA index は `pyproject.toml` ではなく `uv pip install ... --index-url https://download.pytorch.org/whl/cu116` で指定する。（注: 措置2は `uv sync` だけを塞ぐ。`uv pip sync` は `pyproject.toml` 無しでも動くため、措置1の禁止も併せて必要）
+3. **中途半端な `dependencies` リストを作らない**。宣言管理を採るなら全依存（ソースビルド・editable 含む）を完全宣言する必要があり非現実的なため、本プロジェクトでは宣言管理を採用しない。
+4. **構築直後に `uv pip freeze > requirements.lock.txt` でスナップショットを取得**し、git管理する。これが「実際に動いた厳密な全依存」の正本となり、万一壊れても復元できる（TECH_STACK 上の「バージョン未固定の注意」「解決版を記録」の具体的手段でもある）。
+
+### 依存記録の役割分担
+
+| ファイル | 役割 | 内容・正本性 |
+|---------|------|-------------|
+| `requirements.txt`（公式） | 上流の緩いスペック | 4DGaussians公式が定義。`torch==1.13.1`（CUDA無印）等。**版の正本ではない** |
+| `docs/TECH_STACK.md`（本書） | 人間向けキュレーション記録 | 主要ライブラリの**用途・選定理由・バージョン方針**（なぜ）。全量ではない |
+| `requirements.lock.txt`（我々が生成） | 機械的な厳密スナップショット | `uv pip freeze` の全出力（推移的依存含む）。**正確な導入版の正本**。復旧・再現に使う |
+
+> 運用: ライブラリを追加・変更・削除したら、(1) `uv pip install`/`uv pip uninstall` で操作し、(2) `docs/TECH_STACK.md` の用途・方針を更新し、(3) `uv pip freeze > requirements.lock.txt` を再生成する（CLAUDE.md「ドキュメント作成ルール」と一致）。
 
 ---
 

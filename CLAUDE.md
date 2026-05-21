@@ -155,8 +155,9 @@
 - ドキュメントは `docs/issues/{案件フォルダ}/` に置く（`requirements.md`, `design.md`, `investigation.md`）
 - **/clear 後でも実装がスムーズにできるよう、必要な情報を全て記述する**
 - 暗黙知に頼らず、**自己完結したドキュメント**にする（前の会話コンテキストがなくても実装できること）
-- ライブラリの追加・変更・削除を行った場合は `docs/TECH_STACK.md` も更新すること
+- ライブラリの追加・変更・削除を行った場合は `docs/TECH_STACK.md` を更新し、**`requirements.lock.txt` を `uv pip freeze` で再生成**すること
 - 新規ライブラリ導入時は用途・選定理由・バージョンを `TECH_STACK.md` に追記すること
+- **uv 依存管理ルール（厳守）**: パッケージ追加は常に `uv pip install`（追加的）で行い、**`uv sync` / `uv pip sync` は使わない**（未宣言パッケージを削除し環境を破壊するため）。`pyproject.toml` は作らない。背景・詳細・依存記録の役割分担は `docs/TECH_STACK.md`「uv 依存管理ルール」を参照
 
 ### 案件ディレクトリ構成
 
