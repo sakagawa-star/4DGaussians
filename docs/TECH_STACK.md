@@ -57,16 +57,18 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 | torch | == 1.13.1（CUDA版サフィックスなし） | テンソル演算・GPU学習 | requirements.txt は `torch==1.13.1`（バージョンは固定だが `+cu116` 等のCUDAサフィックスが付かない）。**cu116版を `--index-url https://download.pytorch.org/whl/cu116` で明示導入**する。CUDA拡張は `/usr/local/cuda-11.6` でビルド（メジャー・マイナー一致）。cu117 + cuda-11.7 でも可 |
 | torchvision | == 0.14.1 | 画像変換 | torch 1.13.1 に対応 |
 | torchaudio | == 0.13.1 | （依存解決用） | torch 1.13.1 に対応 |
-| mmcv | == 1.6.0 | 設定ファイル（`arguments/*.py`）の読み込み（`mmcv.Config.fromfile`） | `train.py`/`render.py`/`export_perframe_3DGS.py`/`merge_many_4dgs.py` が `--configs` 指定時に使用。純Pythonの `mmcv`（`mmcv-full`ではない）でCUDAビルド不要。Python 3.10での導入可否は要確認（feat-001） |
+| mmcv | == 1.6.0 | 設定ファイル（`arguments/*.py`）の読み込み（`mmcv.Config.fromfile`） | `train.py`/`render.py`/`export_perframe_3DGS.py`/`merge_many_4dgs.py` が `--configs` 指定時に使用。純Pythonの `mmcv`（`mmcv-full`ではない）でCUDA opsビルド不要。ただし**cp310 wheelが無くsdistビルドが必要**で、`setup.py` が `pkg_resources` に依存する。**feat-001で `setuptools<81`（pkg_resources同梱版）導入＋`--no-build-isolation` でビルド成功を確認** |
 | lpips | — | 知覚的画質評価（学習・評価） | |
 | plyfile | — | 点群PLY入出力 | |
 | pytorch_msssim | — | MS-SSIM損失・評価 | |
 | open3d | — | 点群処理・可視化 | |
 | imageio[ffmpeg] | — | 動画入出力 | |
 | matplotlib | — | 可視化 | |
-| argparse | — | 引数解析（標準ライブラリと重複） | |
+| argparse | （導入しない） | 引数解析（標準ライブラリと重複） | PyPI版（最終リリース2010年）は標準ライブラリをシャドーイングする恐れがあるため**feat-001で導入対象から除外**。Python 3.10標準ライブラリを使用（design ADR-6） |
+| numpy | == 1.23.5（feat-001で固定） | 数値計算（torch/open3d等の基盤） | requirements.txt 無指定だが、torch依存解決で numpy 2.x が入ると torch 1.13.1（numpy 1.x ABI）の `torch.from_numpy` 等が `RuntimeError: Numpy is not available` で不能。**1.23.5 に明示固定**。open3d 0.19 / opencv 4.13 / scipy 1.15 等は 1.23.5 でもABI互換（feat-001検証済み） |
+| setuptools | < 81（feat-001で 80.10.2） | mmcv 1.6.0 の sdist ビルド用ツール | mmcv 1.6.0 が `pkg_resources` に依存。setuptools 81+ は pkg_resources を削除済みのため **<81 が必須**。`--no-build-isolation` でビルド時に使用 |
 
-> **バージョン未固定の注意**: lpips / plyfile / pytorch_msssim / open3d / imageio / matplotlib は requirements.txt でバージョン無指定（最新解決）。Python 3.10 + torch 1.13.1（cu116）という固定環境では、特に open3d / imageio[ffmpeg] の最新版が要求する numpy 等が非整合になりうる。feat-001 で解決版を実地確認・記録し、競合が出たら版を固定する。
+> **バージョン未固定の注意（feat-001で実地確認済み・2026-05-21）**: lpips / plyfile / pytorch_msssim / open3d / imageio / matplotlib は requirements.txt でバージョン無指定（最新解決）。最新解決で open3d 0.19.0 / imageio 2.37.3 / scipy 1.15.3 / opencv-python 4.13.0.92 等が入るが、**numpy のみ 1.23.5 に固定**すれば torch 連携・各依存とも整合する（懸念した依存群のABI破損・ダウングレードは不要だった）。解決版の正本は `requirements.lock.txt`。
 
 ## CUDA拡張サブモジュール（要ソースビルド）
 
@@ -186,8 +188,8 @@ CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
 ### 未検証事項（環境構築フェーズで実地検証・記録する）
 
 - 上記方針でCUDA拡張（depth-diff-gaussian-rasterization, simple-knn）が**実際にビルド・import成功するか**（feat-002で検証）
-- mmcv 1.6.0 のインストール可否とバージョン整合（cu116 torch環境下）
-- `requirements.txt` のtorch指定（無印`torch==1.13.1`）と、cu116 index-url 明示インストールの競合回避方法
+- mmcv 1.6.0 のインストール可否とバージョン整合（cu116 torch環境下） → **feat-001で検証済み（2026-05-21）**: `setuptools<81`（pkg_resources同梱）導入＋`--no-build-isolation` でビルド・import 成功
+- `requirements.txt` のtorch指定（無印`torch==1.13.1`）と、cu116 index-url 明示インストールの競合回避方法 → **feat-001で検証済み**: torch系を cu116 index で先行導入し、`requirements.txt` から torch系3行と argparse を grep 除外して残りを導入する2段階方式で競合なし（`+cu116` 維持を確認）
 
 ### 非要件（当面の対象外）
 

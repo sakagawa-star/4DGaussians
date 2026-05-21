@@ -15,7 +15,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-001 | uv環境構築・依存インストール | uv（Python 3.10）で仮想環境を作成し、`TECH_STACK.md` の確定方針（**torch 1.13.1+cu116** を `--index-url .../whl/cu116` で導入）に従って `requirements.txt` の依存（torch系 + mmcv 1.6.0 等）をインストールする | - | Open |
+| feat-001 | uv環境構築・依存インストール | uv（Python 3.10）で仮想環境を作成し、`TECH_STACK.md` の確定方針（**torch 1.13.1+cu116** を `--index-url .../whl/cu116` で導入）に従って `requirements.txt` の依存（torch系 + mmcv 1.6.0 等）をインストールする | - | **Closed**（2026-05-21完了。torch 1.13.1+cu116 / cuda 11.6 / A100認識を確認。mmcvはsetuptools<81＋`--no-build-isolation`、numpyは1.23.5固定で対処） |
 
 **判定基準（案）**: `import torch` が成功し `torch.cuda.is_available()` が `True`、かつ `torch.version.cuda` が文字列 `'11.6'` を返す。GPU（A100）が認識される。
 

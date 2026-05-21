@@ -65,7 +65,8 @@
 4DGaussians/
 ├── CLAUDE.md               # 本ファイル
 ├── README.md               # オリジナルのREADME（公式セットアップ手順）
-├── requirements.txt        # pip依存定義（torch 1.13.1 等）
+├── requirements.txt        # pip依存定義（torch 1.13.1 等、公式・緩いスペック）
+├── requirements.lock.txt   # 依存の厳密スナップショット（uv pip freeze、版の正本。feat-001で生成）
 ├── train.py                # 学習エントリポイント
 ├── render.py               # レンダリング
 ├── metrics.py              # 評価

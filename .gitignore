@@ -12,3 +12,4 @@ submodules/
 
 # Claude Code のローカル作業ファイル（handover・ローカル設定）。公開フォークに出さない
 .claude/
+.venv/
