@@ -20,9 +20,9 @@
 ### 背景
 
 - 公式README（`README.md`）はconda + Python 3.7 + PyTorch 1.13.1+cu116 を前提とした手順を案内している
-- 本マシンには **conda が無い** ため、ViTPose環境で実績のある **uv** を用いて環境を構築する（[docs/TECH_STACK.md](docs/TECH_STACK.md) 参照）
+- 本マシンには **conda が無い** ため、**uv** を用いて環境を構築する（[docs/TECH_STACK.md](docs/TECH_STACK.md) 参照）
 - CUDA拡張（`depth-diff-gaussian-rasterization`, `simple-knn`）のソースビルドが必須であり、これがセットアップの主要難所となる
-- 開発プロセスのルール（要求仕様書・機能設計書・レビュー・不具合修正の基準）は ViTPose プロジェクト（`~/git/ViTPose/docs/`）で確立したものを移植している
+- 開発プロセスのルール（要求仕様書・機能設計書・レビュー・不具合修正の基準）は `docs/` 配下に独立して保持する汎用基準を用いる（本リポジトリ内で自己完結し、他プロジェクトに依存しない）
 
 ## 実行環境（本マシン）
 

@@ -10,7 +10,7 @@
 
 | 項目 | 値 | 根拠 |
 |------|-----|------|
-| 言語 | Python 3.10（uv managed Python） | 公式は3.7だが**uvは3.7を提供しない（managed Pythonの下限は3.8.20）**。torch 1.13.1のwheelはcp38〜cp311に存在し、3.10ならビルド済みwheelを利用可。ViTPose環境（3.10.16）の実績にも合わせる |
+| 言語 | Python 3.10（uv managed Python） | 公式は3.7だが**uvは3.7を提供しない（managed Pythonの下限は3.8.20）**。torch 1.13.1のwheelはcp38〜cp311に存在し、3.10ならビルド済みwheelを利用可 |
 | パッケージ管理 | uv 0.11.6（condaは使わない） | 公式のcondaは**Pythonインタープリタ生成のみ**に使われ、依存は全てpip。`uv venv` + `uv pip` で等価に置換できることを確認済み（2026-05-20調査）。本マシンにcondaは無い |
 | 対象OS | Ubuntu Linux | 開発環境 |
 | GPU | NVIDIA A100-SXM4-40GB × 7（Driver 565.57.01） | 4DGSの学習・レンダリングに使用（単一GPUで動作。マルチGPUは非要件） |
@@ -25,7 +25,7 @@
 | `/usr/local/cuda-11.7` | 11.7.99 | システム。cu117採用時の代替 |
 | `/usr/local/cuda-11.8` | 11.8.89 | システム（`/usr/local/cuda-11` → **11.8**） |
 | `/usr/local/cuda-12.3` | 12.3.107 | システム（`/usr/local/cuda-12` → ここ） |
-| `~/cuda/cuda-12.8` | 12.8.93 | ユーザー導入。`~/.bashrc` でグローバルにアクティブ（ViTPose環境用） |
+| `~/cuda/cuda-12.8` | 12.8.93 | ユーザー導入。`~/.bashrc` でグローバルにアクティブ（このマシンの別環境が使用。4DGSでは使わない） |
 
 補助情報: ドライバ 565.57.01（CUDA 12.7まで対応、cu116ランタイムに後方互換）／ A100 = sm_80（CUDA 11.6で完全サポート）。
 
@@ -33,10 +33,10 @@
 
 ### CUDA環境変数の運用方針
 
-`~/.bashrc` でグローバルに設定されている `CUDA_HOME=~/cuda/current`(=**12.8**) は **ViTPose環境が依存しているため変更しない**。
+`~/.bashrc` でグローバルに設定されている `CUDA_HOME=~/cuda/current`(=**12.8**) は **このマシンの別環境が依存しているため変更しない**。
 
 ```
-# グローバル（変更しない。ViTPose用）
+# グローバル（変更しない。このマシンの別環境が使用）
 CUDA_HOME=/home/sakagawa/cuda/current        # = 12.8
 PATH=/home/sakagawa/cuda/current/bin:$PATH
 LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
@@ -123,7 +123,7 @@ pip install -e submodules/simple-knn
 
 ### uvでの等価手順（方針、2026-05-20調査）
 
-condaの役割（Python 3.7環境の生成）をuvで置換する。**Python 3.7はuvで提供されないため3.10を使う**（torch 1.13.1のwheelはcp310にあり、ViTPose環境とも揃う）。**CUDA拡張のビルドは `/usr/local/cuda-11.6` を使う**（torch cu116とメジャー・マイナー一致）。
+condaの役割（Python 3.7環境の生成）をuvで置換する。**Python 3.7はuvで提供されないため3.10を使う**（torch 1.13.1のwheelはcp310にある）。**CUDA拡張のビルドは `/usr/local/cuda-11.6` を使う**（torch cu116とメジャー・マイナー一致）。
 
 ```bash
 cd /data/sakagawa/4DGaussians
@@ -148,7 +148,7 @@ CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
 
 ## uv 依存管理ルール（環境破壊の防止）
 
-> **背景**: ViTPose環境で、`uv pip install` で命令的に構築した環境に対し、依存を完全宣言していない `pyproject.toml` に1パッケージだけ足して `uv sync` を実行した結果、未宣言の主要依存（mmpose / mmcv-full / timm / mmdet / ultralytics 等）が「余分」として一括削除され、環境が破壊された。同型事故を防ぐため本プロジェクトでは以下を厳守する。
+> **背景**: 別のuvプロジェクトで、`uv pip install` で命令的に構築した環境に対し、依存を完全宣言していない `pyproject.toml` に1パッケージだけ足して `uv sync` を実行した結果、未宣言の主要依存が「余分」として一括削除され、環境が破壊された事例があった。同型事故を防ぐため本プロジェクトでは以下を厳守する。
 
 1. **`uv sync` / `uv pip sync` を使わない**。これらは「宣言（`pyproject.toml`+`uv.lock`、または requirements ファイル）に無いパッケージを削除」する剪定動作のため、ソースビルドのCUDA拡張・editable・特殊indexのtorchを巻き込んで壊す。パッケージ追加は常に **`uv pip install`**（追加的・非破壊）で行う。
 2. **`pyproject.toml` を作らない**。無ければ `uv sync` は実行できず（エラー）、事故が構造的に起きない。torch の CUDA index は `pyproject.toml` ではなく `uv pip install ... --index-url https://download.pytorch.org/whl/cu116` で指定する。（注: 措置2は `uv sync` だけを塞ぐ。`uv pip sync` は `pyproject.toml` 無しでも動くため、措置1の禁止も併せて必要）
@@ -180,8 +180,8 @@ CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
 ### 決定済み（2026-05-20）
 
 - **環境管理はconda不使用・uvを使う**: 公式condaはPython生成のみで依存は全てpip。`uv venv` + `uv pip` で等価に置換可能
-- **Pythonは3.10**: uvが3.7を提供しない（下限3.8.20）。torch 1.13.1はcp310 wheelあり、ViTPose実績(3.10.16)とも整合
-- **torchは1.13.1+cu116、CUDA拡張のビルドは `/usr/local/cuda-11.6`**: 公式実績版に一致し、必要なCUDA(11.6)が既存。新規CUDAインストール不要、gcc 11.4も適合。「12.8 vs 11」のメジャー版不一致は**ビルド時のみ`CUDA_HOME`を11.6へ上書き**して回避（グローバルの12.8はViTPose用に維持）
+- **Pythonは3.10**: uvが3.7を提供しない（下限3.8.20）。torch 1.13.1はcp310 wheelあり、3.10で導入可能
+- **torchは1.13.1+cu116、CUDA拡張のビルドは `/usr/local/cuda-11.6`**: 公式実績版に一致し、必要なCUDA(11.6)が既存。新規CUDAインストール不要、gcc 11.4も適合。「12.8 vs 11」のメジャー版不一致は**ビルド時のみ`CUDA_HOME`を11.6へ上書き**して回避（グローバルの12.8はこのマシンの別環境用に維持）
 
 ### 未検証事項（環境構築フェーズで実地検証・記録する）
 
