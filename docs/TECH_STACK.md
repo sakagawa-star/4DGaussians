@@ -1,0 +1,173 @@
+# 技術スタック定義書
+
+最終更新: 2026-05-20
+
+> 本書は4DGaussians環境構築の技術スタックを定義する。確定していない項目は「未検証」と明記し、環境構築フェーズで決定・更新する。
+
+---
+
+## プロジェクト基盤
+
+| 項目 | 値 | 根拠 |
+|------|-----|------|
+| 言語 | Python 3.10（uv managed Python） | 公式は3.7だが**uvは3.7を提供しない（managed Pythonの下限は3.8.20）**。torch 1.13.1のwheelはcp38〜cp311に存在し、3.10ならビルド済みwheelを利用可。ViTPose環境（3.10.16）の実績にも合わせる |
+| パッケージ管理 | uv 0.11.6（condaは使わない） | 公式のcondaは**Pythonインタープリタ生成のみ**に使われ、依存は全てpip。`uv venv` + `uv pip` で等価に置換できることを確認済み（2026-05-20調査）。本マシンにcondaは無い |
+| 対象OS | Ubuntu Linux | 開発環境 |
+| GPU | NVIDIA A100-SXM4-40GB × 7（Driver 565.57.01） | 4DGSの学習・レンダリングに使用（単一GPUで動作。マルチGPUは非要件） |
+| CUDA Toolkit（ビルド用） | **11.6**（`/usr/local/cuda-11.6`） | torch 1.13.1+cu116 とメジャー・マイナーまで一致するCUDAでCUDA拡張をビルドする。新規インストール不要（既存） |
+| ホストコンパイラ | gcc/g++ 11.4.0 | CUDA 11.6/11.7/11.8 は gcc ≤ 11 対応 → 適合（ダウングレード不要） |
+
+### サーバー上のCUDA一覧（2026-05-20調査）
+
+| パス | nvcc版 | 種別・別名 |
+|------|--------|-----------|
+| `/usr/local/cuda-11.6` | 11.6.124 | システム。`/usr/local/cuda` が update-alternatives 経由で現在ここに解決。**4DGSのビルドに使用** |
+| `/usr/local/cuda-11.7` | 11.7.99 | システム。cu117採用時の代替 |
+| `/usr/local/cuda-11.8` | 11.8.89 | システム（`/usr/local/cuda-11` → **11.8**） |
+| `/usr/local/cuda-12.3` | 12.3.107 | システム（`/usr/local/cuda-12` → ここ） |
+| `~/cuda/cuda-12.8` | 12.8.93 | ユーザー導入。`~/.bashrc` でグローバルにアクティブ（ViTPose環境用） |
+
+補助情報: ドライバ 565.57.01（CUDA 12.7まで対応、cu116ランタイムに後方互換）／ A100 = sm_80（CUDA 11.6で完全サポート）。
+
+> **注意（リンク解決）**: `/usr/local/cuda` は二段階リンク（`/usr/local/cuda` → `/etc/alternatives/cuda` → `/usr/local/cuda-11.6`）。管理者が `update-alternatives` を切り替えると指す先が変わりうるため、**ビルドでは曖昧さ回避のため絶対パス `/usr/local/cuda-11.6` を明示**する。なお `/usr/local/cuda-11` は 11.6 ではなく **11.8** に解決される点に注意。
+
+### CUDA環境変数の運用方針
+
+`~/.bashrc` でグローバルに設定されている `CUDA_HOME=~/cuda/current`(=**12.8**) は **ViTPose環境が依存しているため変更しない**。
+
+```
+# グローバル（変更しない。ViTPose用）
+CUDA_HOME=/home/sakagawa/cuda/current        # = 12.8
+PATH=/home/sakagawa/cuda/current/bin:$PATH
+LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
+```
+
+4DGSの**CUDA拡張ビルド時のみ** `CUDA_HOME` を 11.6 に上書きする（下記「uvでの等価手順」参照）。実行時（学習・レンダリング）はtorch wheelが自前のCUDAランタイムを同梱するため `CUDA_HOME` の影響を受けない。
+
+> **監視点**: グローバルの `LD_LIBRARY_PATH` が12.8を指すため、実行時に稀に干渉の可能性。問題が出れば4DGS環境でのみ11.6へ上書き／除外で対処（通常はtorch同梱libが優先され問題なし）。
+
+---
+
+## コア依存関係（公式 `requirements.txt`）
+
+| ライブラリ名 | バージョン要件 | 用途 | 備考 |
+|-------------|--------------|------|------|
+| torch | == 1.13.1（CUDA版サフィックスなし） | テンソル演算・GPU学習 | requirements.txt は `torch==1.13.1`（バージョンは固定だが `+cu116` 等のCUDAサフィックスが付かない）。**cu116版を `--index-url https://download.pytorch.org/whl/cu116` で明示導入**する。CUDA拡張は `/usr/local/cuda-11.6` でビルド（メジャー・マイナー一致）。cu117 + cuda-11.7 でも可 |
+| torchvision | == 0.14.1 | 画像変換 | torch 1.13.1 に対応 |
+| torchaudio | == 0.13.1 | （依存解決用） | torch 1.13.1 に対応 |
+| mmcv | == 1.6.0 | 設定ファイル（`arguments/*.py`）の読み込み（`mmcv.Config.fromfile`） | `train.py`/`render.py`/`export_perframe_3DGS.py`/`merge_many_4dgs.py` が `--configs` 指定時に使用。純Pythonの `mmcv`（`mmcv-full`ではない）でCUDAビルド不要。Python 3.10での導入可否は要確認（feat-001） |
+| lpips | — | 知覚的画質評価（学習・評価） | |
+| plyfile | — | 点群PLY入出力 | |
+| pytorch_msssim | — | MS-SSIM損失・評価 | |
+| open3d | — | 点群処理・可視化 | |
+| imageio[ffmpeg] | — | 動画入出力 | |
+| matplotlib | — | 可視化 | |
+| argparse | — | 引数解析（標準ライブラリと重複） | |
+
+> **バージョン未固定の注意**: lpips / plyfile / pytorch_msssim / open3d / imageio / matplotlib は requirements.txt でバージョン無指定（最新解決）。Python 3.10 + torch 1.13.1（cu116）という固定環境では、特に open3d / imageio[ffmpeg] の最新版が要求する numpy 等が非整合になりうる。feat-001 で解決版を実地確認・記録し、競合が出たら版を固定する。
+
+## CUDA拡張サブモジュール（要ソースビルド）
+
+| サブモジュール | URL | 用途 | 状態 |
+|---------------|-----|------|------|
+| depth-diff-gaussian-rasterization | https://github.com/ingra14m/depth-diff-gaussian-rasterization | 深度対応の微分可能ガウシアンラスタライザ | **未初期化（空）**。`git submodule update --init --recursive` 後に `pip install -e` でビルド |
+| simple-knn | https://gitlab.inria.fr/bkerbl/simple-knn.git | 近傍探索（点群初期化） | **未初期化（空）** |
+
+> ビルド時は **`CUDA_HOME=/usr/local/cuda-11.6` を明示的に上書き**する（グローバルの12.8のままだと、PyTorch `cpp_extension` のCUDAメジャー版チェックで 11(torch) vs 12(nvcc) 不一致となりエラー／重大警告になる）。問題が発生した場合は `docs/issues/` に記録する。
+
+## ビューア（任意）
+
+| 対象 | URL | 用途 | 備考 |
+|------|-----|------|------|
+| SIBR_viewers | https://gitlab.inria.fr/sibr/sibr_core | 学習結果のインタラクティブ可視化 | 環境構築の必須要件ではない。詳細は `docs/viewer_usage.md` |
+
+## 外部ツール
+
+| ツール | 状態 | 用途 |
+|--------|------|------|
+| COLMAP | **未インストール** | 実シーン（HyperNeRF/DyNeRF/カスタム）のSfM前処理。D-NeRF合成シーンでは不要 |
+
+---
+
+## データセット
+
+| データセット | 種別 | 取得元 | 前処理 |
+|-------------|------|--------|--------|
+| D-NeRF | 合成シーン | Dropbox（README参照） | 不要 |
+| HyperNeRF | 実シーン | HyperNeRF releases | COLMAP（事前生成点群あり） |
+| Plenoptic / DyNeRF | 実シーン（多視点動画） | Neural 3D Video公式 | フレーム抽出 + COLMAP |
+
+`data/` 配下に配置する（`.gitignore` 管理外を想定）。
+
+---
+
+## セットアップ手順（公式README、conda前提）
+
+> **注意**: 本マシンにcondaは無い。下記はオリジナル手順の記録であり、実際はuvで等価な環境を構築する（手順は環境構築フェーズの設計書で確定する）。
+
+```bash
+git clone https://github.com/hustvl/4DGaussians
+cd 4DGaussians
+git submodule update --init --recursive
+conda create -n Gaussians4D python=3.7
+conda activate Gaussians4D
+
+pip install -r requirements.txt
+pip install -e submodules/depth-diff-gaussian-rasterization
+pip install -e submodules/simple-knn
+```
+
+公式の動作実績環境: `pytorch=1.13.1+cu116`
+
+### uvでの等価手順（方針、2026-05-20調査）
+
+condaの役割（Python 3.7環境の生成）をuvで置換する。**Python 3.7はuvで提供されないため3.10を使う**（torch 1.13.1のwheelはcp310にあり、ViTPose環境とも揃う）。**CUDA拡張のビルドは `/usr/local/cuda-11.6` を使う**（torch cu116とメジャー・マイナー一致）。
+
+```bash
+cd /data/sakagawa/4DGaussians
+git submodule update --init --recursive          # サブモジュール取得（現状は未初期化）
+uv venv --python 3.10                             # 仮想環境作成（managed Python 3.10）
+
+# 依存導入（torchはcu116を明示）
+uv pip install torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 \
+  --index-url https://download.pytorch.org/whl/cu116
+uv pip install -r requirements.txt                # 残りの依存（torch指定が効くよう順序に注意）
+
+# CUDA拡張ビルド：ビルド時のみCUDA_HOMEを11.6へ上書き（グローバルの12.8は変えない）
+CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
+  uv pip install -e submodules/depth-diff-gaussian-rasterization
+CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
+  uv pip install -e submodules/simple-knn
+```
+
+> 上記は方針スケッチ。確定コマンド（`requirements.txt` 内のtorch指定との競合回避、ビルド時の環境変数の永続化方法等）はfeat-001/feat-002の設計書で定める。
+
+---
+
+## 制約・未検証事項
+
+### 技術上の必須条件
+
+| 制約 | 内容 | 根拠 |
+|------|------|------|
+| NVIDIA GPU 必須 | 4DGSの学習・レンダリングに必要 | CUDA拡張がGPU依存 |
+| CUDA拡張のビルド必須 | depth-diff-gaussian-rasterization, simple-knn のソースビルド | プリビルドwheelが提供されない |
+| CUDA_HOME設定必須 | nvccがビルド時に必要 | CUDA拡張のコンパイル |
+
+### 決定済み（2026-05-20）
+
+- **環境管理はconda不使用・uvを使う**: 公式condaはPython生成のみで依存は全てpip。`uv venv` + `uv pip` で等価に置換可能
+- **Pythonは3.10**: uvが3.7を提供しない（下限3.8.20）。torch 1.13.1はcp310 wheelあり、ViTPose実績(3.10.16)とも整合
+- **torchは1.13.1+cu116、CUDA拡張のビルドは `/usr/local/cuda-11.6`**: 公式実績版に一致し、必要なCUDA(11.6)が既存。新規CUDAインストール不要、gcc 11.4も適合。「12.8 vs 11」のメジャー版不一致は**ビルド時のみ`CUDA_HOME`を11.6へ上書き**して回避（グローバルの12.8はViTPose用に維持）
+
+### 未検証事項（環境構築フェーズで実地検証・記録する）
+
+- 上記方針でCUDA拡張（depth-diff-gaussian-rasterization, simple-knn）が**実際にビルド・import成功するか**（feat-002で検証）
+- mmcv 1.6.0 のインストール可否とバージョン整合（cu116 torch環境下）
+- `requirements.txt` のtorch指定（無印`torch==1.13.1`）と、cu116 index-url 明示インストールの競合回避方法
+
+### 非要件（当面の対象外）
+
+- 実シーン（HyperNeRF/DyNeRF）の学習（COLMAP導入が前提。まずD-NeRF合成シーンで動作確認）
+- SIBR_viewersによる可視化
+- マルチGPU分散学習
