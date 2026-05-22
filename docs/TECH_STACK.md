@@ -74,10 +74,10 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 
 | サブモジュール | URL | 用途 | 状態 |
 |---------------|-----|------|------|
-| depth-diff-gaussian-rasterization | https://github.com/ingra14m/depth-diff-gaussian-rasterization | 深度対応の微分可能ガウシアンラスタライザ | **未初期化（空）**。`git submodule update --init --recursive` 後に `pip install -e` でビルド |
-| simple-knn | https://gitlab.inria.fr/bkerbl/simple-knn.git | 近傍探索（点群初期化） | **未初期化（空）** |
+| depth-diff-gaussian-rasterization | https://github.com/ingra14m/depth-diff-gaussian-rasterization | 深度対応の微分可能ガウシアンラスタライザ | **ビルド済み（feat-002, 2026-05-21）**。glm（ネストsubmodule）含め取得し editable ビルド成功・import確認 |
+| simple-knn | https://gitlab.inria.fr/bkerbl/simple-knn.git | 近傍探索（点群初期化） | **ビルド済み（feat-002）**。uv editable では `simple_knn/__init__.py`（`import torch` 記載）の追加が必要（investigation.md Iteration 1） |
 
-> ビルド時は **`CUDA_HOME=/usr/local/cuda-11.6` を明示的に上書き**する（グローバルの12.8のままだと、PyTorch `cpp_extension` のCUDAメジャー版チェックで 11(torch) vs 12(nvcc) 不一致となりエラー／重大警告になる）。問題が発生した場合は `docs/issues/` に記録する。
+> ビルド時は **`CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH` をインライン上書き**し、**`--no-build-isolation`** を付けて `uv pip install --python .venv/bin/python -e` する（グローバルの12.8のままだと、PyTorch `cpp_extension` のCUDAメジャー版チェックで 11(torch) vs 12(nvcc) 不一致となりエラー／重大警告になる）。インライン上書きはコマンド限りでグローバル設定（12.8）を汚さない。feat-002（2026-05-21）で実地検証済み。手順・ハマりどころは `docs/issues/feat-002-cuda-ext-build/`（design.md・investigation.md）。
 
 ## ビューア（任意）
 
@@ -187,7 +187,7 @@ CUDA_HOME=/usr/local/cuda-11.6 PATH=/usr/local/cuda-11.6/bin:$PATH \
 
 ### 未検証事項（環境構築フェーズで実地検証・記録する）
 
-- 上記方針でCUDA拡張（depth-diff-gaussian-rasterization, simple-knn）が**実際にビルド・import成功するか**（feat-002で検証）
+- 上記方針でCUDA拡張（depth-diff-gaussian-rasterization, simple-knn）が実際にビルド・import成功するか → **feat-002で検証済み（2026-05-21）**: 両者とも editable ビルド成功・import確認。simple-knn は uv editable 向けに `simple_knn/__init__.py`（`import torch`）の追加が必要だった（investigation.md Iteration 1）
 - mmcv 1.6.0 のインストール可否とバージョン整合（cu116 torch環境下） → **feat-001で検証済み（2026-05-21）**: `setuptools<81`（pkg_resources同梱）導入＋`--no-build-isolation` でビルド・import 成功
 - `requirements.txt` のtorch指定（無印`torch==1.13.1`）と、cu116 index-url 明示インストールの競合回避方法 → **feat-001で検証済み**: torch系を cu116 index で先行導入し、`requirements.txt` から torch系3行と argparse を grep 除外して残りを導入する2段階方式で競合なし（`+cu116` 維持を確認）
 

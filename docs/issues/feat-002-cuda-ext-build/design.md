@@ -301,3 +301,27 @@ GUI・ステートフル処理は無い。作業は「取得 → ビルド(raste
 - `--no-build-isolation` 下の build backend ツール: 本セッションで `.venv` に setuptools 80.10.2 / wheel 0.47.0 が存在することを確認済み。E7 は不足時の保険として残す。
 - ビルド済み `.so` の import 時に、グローバル `LD_LIBRARY_PATH`（12.8）が干渉しないか（通常 torch 同梱lib優先で問題なしの想定。干渉時 E4）。
 - editable 2点が `uv pip freeze` でどの形式（`-e file://` / `@ file://`）で出力されるか（FR-005、どちらでも可）。
+
+---
+
+## 実装結果（2026-05-21）
+
+FR-001〜005 を実装し、判定基準を達成した。
+
+### 判定結果
+
+- FR-001: `git submodule update --init --recursive` で rasterizer / simple-knn を取得。**glm はネスト submodule として取得**（E2(a)、`third_party/glm` 登録あり→recursive取得）。`glm/glm.hpp` 存在確認。
+- FR-002: rasterizer を editable ビルド成功（`diff-gaussian-rasterization==0.0.0`、約1分27秒）。`import diff_gaussian_rasterization` ＋シンボル import 成功。
+- FR-003: simple-knn を editable ビルド成功（`simple-knn==0.0.0`、約1分26秒）。**ただし import で2段階の計画外問題が発生**（下記、investigation.md Iteration 1）。最終的に単独 import・シンボル import とも成功。
+- FR-004: 統合検証 `OK: CUDA ext import | torch 1.13.1+cu116 | cuda 11.6 | device NVIDIA A100-SXM4-40GB`。
+- FR-005: `requirements.lock.txt` 再生成。CUDA 拡張2点を `-e file:///...` 形式で記録。torch/mmcv/numpy 退行なし、`git diff` 追加行は当該2点のみ。
+- ninja 不在のため torch は distutils フォールバックでビルド（各約1.5分）。グローバル CUDA 12.8 への影響なし（インライン上書きはコマンド限り）。
+
+### 計画外対処（ADR-1 の補足知見、詳細は investigation.md Iteration 1）
+
+simple-knn は `__init__.py` を持たない C拡張専用パッケージ（`setup.py` の `ext_modules=simple_knn._C` のみ、`packages` 未指定）であり、2つの問題が連鎖した。
+
+1. **`ModuleNotFoundError`**: uv の editable（PEP 660 finder）は対象パッケージに `__init__.py` を要求する。従来の `pip install -e`（setuptools develop が sys.path に直接追加）では暗黙的名前空間パッケージ（PEP 420）で解決されたが、uv では不可。→ **空 `__init__.py` を追加**（案 A）。
+2. **`ImportError: libc10.so`**: 空 `__init__.py` だと `import simple_knn._C` 単独時に torch の共有ライブラリが未ロードで失敗。→ **`__init__.py` に `import torch` を記載**（案 X）。rasterizer は `__init__.py` が torch を import するため単独でも通っていた。
+
+**ADR-1 補足**: 4DGS の CUDA 拡張を uv で editable ビルドする場合、`__init__.py` を持たないパッケージ（simple-knn）には `import torch` を含む `__init__.py` が必要。これはサブモジュール内のため git 追跡対象外。環境再構築時は investigation.md に従い再作成する。

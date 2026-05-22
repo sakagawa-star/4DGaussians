@@ -48,7 +48,7 @@
 
 ## サブモジュールの状態
 
-- `submodules/depth-diff-gaussian-rasterization` と `submodules/simple-knn` は **未初期化（空）**。`git submodule update --init --recursive` が必要
+- `submodules/depth-diff-gaussian-rasterization` と `submodules/simple-knn` は **ビルド済み（feat-002, 2026-05-22）**。`git submodule update --init --recursive`（glm含む）取得後、CUDA 11.6・`--no-build-isolation` で editable ビルド。simple-knn は uv editable 向けに `simple_knn/__init__.py`（`import torch`）を追加（git管理外。`docs/issues/feat-002-cuda-ext-build/investigation.md` 参照）
 - `SIBR_viewers`（`.gitmodules` に定義）は可視化ビューア。環境構築の必須要件ではない
 
 ## データセット

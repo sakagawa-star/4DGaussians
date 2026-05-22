@@ -25,7 +25,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-002 | サブモジュール初期化・CUDA拡張ビルド | `git submodule update --init --recursive` でサブモジュールを取得し、`depth-diff-gaussian-rasterization` と `simple-knn` をソースビルドする。**ビルド時は `CUDA_HOME=/usr/local/cuda-11.6` を上書き**する（グローバルの12.8のままだと、torch(cu116)とnvccのメジャー版不一致 12 vs 11 でビルドエラーまたは重大な互換性警告が生じうる） | feat-001 | **In Progress**（2026-05-21 着手。`docs/issues/feat-002-cuda-ext-build/` 作成、要求仕様・設計レビュー中） |
+| feat-002 | サブモジュール初期化・CUDA拡張ビルド | `git submodule update --init --recursive` でサブモジュールを取得し、`depth-diff-gaussian-rasterization` と `simple-knn` をソースビルドする。**ビルド時は `CUDA_HOME=/usr/local/cuda-11.6` を上書き**する（グローバルの12.8のままだと、torch(cu116)とnvccのメジャー版不一致 12 vs 11 でビルドエラーまたは重大な互換性警告が生じうる） | feat-001 | **Closed**（2026-05-22完了。FR-001〜005達成。rasterizer/simple-knn を CUDA11.6・no-build-isolation で editable ビルドしimport確認。simple-knn は uv editable 向けに simple_knn/__init__.py へ import torch を追加。手動テスト合格） |
 
 **判定基準（案）**: 以下を全て満たす。
 - 事前確認: `/usr/local/cuda-11.6/bin/nvcc --version` が `release 11.6` を返す
