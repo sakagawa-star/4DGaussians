@@ -22,9 +22,10 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python train.py \
 
 ## ステータス
 
-- **Open**（未着手 → 調査・ドキュメント作成中）
+- **Closed**（2026-05-22完了。coarse3000+fine20000=計23000反復を約10分（A100×1）で完走。`output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物生成。ITER14000 test PSNR=39.84、最終点数27,769。実装中に Pillow 12.2.0 非互換（`scene/dataset_readers.py:287` `np.byte`→`np.uint8`）を修正（investigation.md イテレーション1）。手動テスト合格）
 - 依存: feat-002（CUDA拡張ビルド）= Closed、feat-003（D-NeRFデータ準備）= Closed
 - 後続: feat-005（レンダリング動作確認）
+- 関連: investigation.md（実装中に発覚した PIL TypeError の修正計画・記録）
 
 ## 判定基準
 

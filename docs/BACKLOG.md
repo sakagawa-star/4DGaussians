@@ -47,7 +47,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-004 | D-NeRF学習動作確認 | `python train.py -s data/dnerf/bouncingballs --port 6017 --expname "dnerf/bouncingballs" --configs arguments/dnerf/bouncingballs.py` で学習が完走する。出力先は `--expname` から `./output/{expname}` と決まるため **`--expname` 指定が必須**（未指定だと `./output/` 直下に出力される） | feat-003 | Open |
+| feat-004 | D-NeRF学習動作確認 | `python train.py -s data/dnerf/bouncingballs --port 6017 --expname "dnerf/bouncingballs" --configs arguments/dnerf/bouncingballs.py` で学習が完走する。出力先は `--expname` から `./output/{expname}` と決まるため **`--expname` 指定が必須**（未指定だと `./output/` 直下に出力される） | feat-003 | **Closed**（2026-05-22完了。coarse3000+fine20000=計23000反復を約10分（A100×1）で完走。`output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物（point_cloud.ply 6.9MB＋deformation*.pth）生成。ITER14000 test PSNR=39.84、最終点数27,769。実装中に発覚した Pillow 12.2.0 非互換を bug修正（`scene/dataset_readers.py:287` `np.byte`→`np.uint8`、investigation.md記録）。手動テスト合格） |
 
 **判定基準（案）**: 学習がクラッシュせず完走し、fine 段階の `output/dnerf/bouncingballs/point_cloud/iteration_14000/` と `iteration_20000/` 配下に `point_cloud.ply` が生成される。
 - `--configs arguments/dnerf/bouncingballs.py`（→ `_base_ = dnerf_default.py`）が `arguments/__init__.py` のクラスデフォルト `iterations=30000` を **20000** に、`coarse_iterations` を **3000** に上書きする。`--save_iterations` 既定は `[14000, 20000, 30000, 45000, 60000]`（実行時に `args.iterations`=20000 をappend）。fine 段階(20000)で到達するのは 14000・20000 のみ。coarse 段階は最大3000イテレーションで `save_iterations`（最小14000）に到達しないため `coarse_iteration_*` は**生成されない**

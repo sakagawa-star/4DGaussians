@@ -59,6 +59,12 @@
 - **HyperNeRF（実シーン）**: colmap 前処理が必要
 - **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要
 
+## オリジナルコードの変更点
+
+4DGaussians 本体は原則変更しない（開発方針）。やむを得ず変更した箇所を以下に記録する（理由の詳細は各案件ドキュメント参照）。
+
+- **`scene/dataset_readers.py:287`（feat-004, 2026-05-22）**: `Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")` の `np.byte`（int8）を `np.uint8` に変更。新しい **Pillow 12.2.0** が `Image.fromarray(..., "RGB")` に int8 配列（`|i1`）を受理せず `TypeError` でクラッシュするため（旧 Pillow は許容）。RGB 値 0〜255 は uint8 が意味的に正しい。Blender(D-NeRF) の train/test 読み込み（学習・レンダリング・評価の全経路）で使用。詳細・ADR は `docs/issues/feat-004-dnerf-train/investigation.md`
+
 ## ディレクトリ構成（主要部分）
 
 ```
