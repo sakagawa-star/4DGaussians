@@ -37,7 +37,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-003 | D-NeRFデータ準備 | D-NeRF合成シーン（bouncingballs等）をDLし `data/dnerf/` に配置。ディレクトリ構成をREADME通りに整える | feat-002 | Open |
+| feat-003 | D-NeRFデータ準備 | D-NeRF合成シーン（bouncingballs等）をDLし `data/dnerf/` に配置。ディレクトリ構成をREADME通りに整える | feat-002 | **Closed**（2026-05-22完了。`data.zip`（246MB）をDropboxからDL→展開→`data/dnerf/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）配置。bouncingballs整合性検証合格（train=150/test=20、全画像実在、Blender判定構成OK）。`data/` は.gitignore管理外でコミットせず。手動テスト合格） |
 
 **判定基準（案）**: `data/dnerf/{scene}/` 配下に学習に必要なファイル（transforms, frames等）が揃っている。
 

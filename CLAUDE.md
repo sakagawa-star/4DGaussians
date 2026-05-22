@@ -55,7 +55,7 @@
 
 学習・評価には外部データセットが必要（`data/` 配下、`.gitignore` 管理外を想定）。
 
-- **D-NeRF（合成シーン）**: 最初の動作確認に使用。Dropbox から `data.zip` をDL（README参照）
+- **D-NeRF（合成シーン）**: 最初の動作確認に使用。**取得済み（feat-003, 2026-05-22）**。Dropbox の `data.zip`（246MB）を展開し `data/dnerf/{scene}/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）を配置。各シーンに `transforms_{train,val,test}.json` と `train/`・`val/`・`test/`（png）。本体は train/test のみ読込。`data/` は `.gitignore` 管理外（git未追跡。再取得手順は `docs/issues/feat-003-dnerf-data/design.md` 参照）
 - **HyperNeRF（実シーン）**: colmap 前処理が必要
 - **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要
 
