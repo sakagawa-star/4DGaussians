@@ -71,7 +71,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-006 | 評価動作確認 | `python metrics.py --model_paths output/dnerf/bouncingballs/`（正式な引数名は `--model_paths`/`-m`、必須・複数指定可。公式READMEは単数 `--model_path` と記載するが、argparseの前置一致で単数形も受理される）でPSNR/SSIM/LPIPS/MS-SSIM/D-SSIMが算出される | feat-005 | Open |
+| feat-006 | 評価動作確認 | `python metrics.py --model_paths output/dnerf/bouncingballs/`（正式な引数名は `--model_paths`/`-m`、必須・複数指定可。公式READMEは単数 `--model_path` と記載するが、argparseの前置一致で単数形も受理される）でPSNR/SSIM/LPIPS/MS-SSIM/D-SSIMが算出される | feat-005 | **In Progress**（2026-05-25 着手。案件作成・要求仕様書/機能設計書を作成。調査でLPIPS重み4ファイル（vgg16/alexnet/lin vgg・alex）をDL・キャッシュ済み、論文値（bouncingballs PSNR 40.62/SSIM 0.9942/LPIPS 0.0155）を確認。合格閾値確定。レビュー中） |
 
 **判定基準（案）**:
 - 前提: feat-005で `test` セットを生成済みで、`output/dnerf/bouncingballs/test/ours_20000/{renders,gt}` に画像が揃っていること。`metrics.py` は `test/` 配下のみを評価し、`test/` 直下の各 `ours_*` を全列挙して評価する（複数iterationを実行して `ours_14000`・`ours_20000` が併存する場合は両方が results.json にmethod別で出力される）
