@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python metrics.py \
 
 ## ステータス
 
-- **In Progress**（要求仕様書・機能設計書を作成し、レビュー中）
+- **Closed**（2026-05-25 完了。約62秒（A100×1）で test 20枚を評価完走、exit code 0。6指標を算出: **PSNR 40.68 / SSIM 0.9943 / LPIPS-vgg 0.0155 / LPIPS-alex 0.0059 / MS-SSIM 0.9954 / D-SSIM 0.0023**（論文 bouncingballs 値とほぼ一致、特に LPIPS-vgg は論文と同値）。`results.json`/`per_view.json` 生成。LPIPS 重みはキャッシュから読込（再 DL なし）。**コード変更ゼロ・不具合なし**。手動テスト合格。**これをもって「D-NeRF が正常動作する環境」の構築完了**）
 - 依存: feat-005（D-NeRFレンダリング動作確認）= Closed（成果物 `test/ours_20000/{renders,gt}` を評価入力に使う）
 - 後続: なし（Phase 5 完了 = D-NeRF 動作確認の最終段階）
 
