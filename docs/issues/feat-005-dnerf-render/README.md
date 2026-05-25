@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python render.py \
 
 ## ステータス
 
-- **Open**（2026-05-22 案件作成）
+- **Closed**（2026-05-25 完了。約13秒（A100×1）で test 20 枚＋video 160 枚をレンダリング完走、exit code 0。`test/ours_20000/{renders,gt}` 各20枚・`video/ours_20000/renders` 160枚・両セットの `video_rgb.mp4`（非空）を生成。`point nums: 27769`（feat-004 最終と一致）。**コード変更ゼロ・不具合なし**（Pillow 問題は再発せず）。目視確認①〜④合格。手動テスト合格）
 - 依存: feat-004（D-NeRF学習動作確認）= Closed（成果物 `output/dnerf/bouncingballs/` を入力に使う）
 - 後続: feat-006（評価動作確認）— 本案件が生成する `test/ours_20000/{renders,gt}` を評価入力にする
 

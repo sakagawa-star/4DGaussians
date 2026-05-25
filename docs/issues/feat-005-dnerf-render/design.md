@@ -211,3 +211,31 @@ CLAUDE.md 開発方針。`imageio_ffmpeg` は導入済みで mp4 出力に追加
 - U3: `video_rgb.mp4`（test・video）が非空で生成されるか（ffmpeg 経路の実動）
 - U4: `point nums:` がロード後に妥当な値（feat-004 最終 27,769 前後）を示すか
 - U5: レンダリング所要時間（参考値）と FPS の実測
+
+## 実装結果（2026-05-25）
+
+設計どおりのコマンド（§1.4.1）でレンダリングを実行し、**全 FR 合格・コード変更ゼロ**で完走した。所要時間は約13秒（16:42:44 起動 → 16:42:57 完了）、exit code 0。
+
+### 計画外対処（不具合）
+
+なし。feat-004 で危惧した Pillow 12.2.0 の型互換問題（`dataset_readers.py:287`）は再発しなかった。video 生成（`generateCamerasFromTransforms`）は `Image.fromarray(...,"RGB")` を通らず、test/train 読み込みは feat-004 で `np.uint8` に修正済みのため。設計どおりコードは一切変更していない。
+
+### 判定結果（FR-001〜005 全合格）
+
+| FR | 結果 | 根拠 |
+|----|------|------|
+| FR-001 | ✓ | ログに `Looking for config file in output/dnerf/bouncingballs/cfg_args`・`Loading trained model at iteration 20000`・`Found transforms_train.json file, assuming Blender data set!`。CUDA 拡張・Pillow/numpy 型エラーなし。`point nums: 27769`（feat-004 最終と一致） |
+| FR-002 | ✓ | `test/ours_20000/renders/` 20 枚・`gt/` 20 枚（同数・非空）。`renders/00000.png`=84,531B 等 |
+| FR-003 | ✓ | `video/ours_20000/renders/` 160 枚（非空）。`gt/` は空ディレクトリのみ（0 枚＝設計どおり） |
+| FR-004 | ✓ | `test/ours_20000/video_rgb.mp4`=78,975B・`video/ours_20000/video_rgb.mp4`=259,638B（いずれも非空） |
+| FR-005 | ✓ | `/data/sakagawa/tmp/feat005-dnerf-render/render.log` にログ全体を保存 |
+
+目視確認（手動テスト）も合格: ① renders 単体がシーンとして妥当、② test renders と gt が概ね一致、③ video（円軌道 mp4）が破綻なく回り込む、④ test の各コマ（frame 5/12/19 等）が視点・時刻ともに変化し破綻なし。
+
+### 未検証事項の確定（U1〜U5）
+
+- **U1**: 確定。`searchForMaxIteration` は **20000** を選択（ログ `Loading trained model at iteration 20000`）
+- **U2**: 確定。test renders=20・gt=20、video renders=160 で揃った
+- **U3**: 確定。test・video の `video_rgb.mp4` が非空生成（imageio + imageio_ffmpeg 0.6.0 の ffmpeg 経路が実動）
+- **U4**: 確定。`point nums: 27769`（feat-004 最終点数と一致＝正しくロード）
+- **U5**: 確定。所要時間 約13秒。FPS = test **14.97** / video **82.54**（video は gt 比較なしで高速）

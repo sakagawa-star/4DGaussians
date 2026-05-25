@@ -59,7 +59,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-005 | レンダリング動作確認 | `python render.py --model_path "output/dnerf/bouncingballs/" --skip_train --configs arguments/dnerf/bouncingballs.py` でレンダリング画像・動画が生成される | feat-004 | Open |
+| feat-005 | レンダリング動作確認 | `python render.py --model_path "output/dnerf/bouncingballs/" --skip_train --configs arguments/dnerf/bouncingballs.py` でレンダリング画像・動画が生成される | feat-004 | **Closed**（2026-05-25完了。約13秒（A100×1）で test 20枚＋video 160枚を完走、exit code 0。`test/ours_20000/{renders,gt}`各20枚・`video/ours_20000/renders`160枚・両セットの`video_rgb.mp4`（非空）を生成。iteration_20000を自動選択、`point nums: 27769`（feat-004最終と一致）。コード変更ゼロ・不具合なし（Pillow問題は再発せず）。目視確認①〜④合格。手動テスト合格） |
 
 **判定基準（案）**: `--iteration` 未指定時は `point_cloud/` の最大iteration=20000が選択され、以下が生成・視認できる（`--skip_train` のため `train/` は生成されない）。
 - `output/dnerf/bouncingballs/test/ours_20000/`: `renders/` 画像・`gt/` 画像・`video_rgb.mp4`
