@@ -238,10 +238,3 @@ codex exec resume {SESSION_ID} -o docs/issues/{案件フォルダ}/reviews/codex
 - 重要度:高と中は修正対象とする
 - レビュー基準の詳細は `docs/REVIEW_CRITERIA.md` を参照
 
-## Claude Code 運用ルール
-
-### Bash 実行時のルール
-
-- **`cd {path} && {command}` の連結は禁止。** Bashツールはプロジェクト作業ディレクトリで動くため `cd` は不要。連結すると先頭トークンが `cd` になり、`.claude/settings.json` / `.claude/settings.local.json` のallowlist（例: `Bash(codex exec *)`、`Bash(git status)`）が一致せず、毎回パーミッションプロンプトが発生する
-- 別ディレクトリで実行する必要がある場合は、コマンド側のオプションを使う（例: `git -C {path} status`、`make -C {path} ...`）
-- どうしても複数コマンド連結が必要な場合も、先頭トークンが安全・許可済みであるかを確認してから書く
