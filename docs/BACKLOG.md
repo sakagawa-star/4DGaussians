@@ -95,7 +95,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-007 | マルチGPU運用対応 | 複数人共用GPUサーバーで、GPU0以外の空いている任意の1GPUを選んで学習・レンダリング・評価を動かせるようにする。**実機検証で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理GPU N に乗ることを確認済み（2026-06-18、コード修正不要）**。本案件は train/render/metrics の全経路がD-NeRFで GPU≠0 完走することの確認と、運用ルールの文書化が主眼 | feat-006 | **In Progress**（2026-06-18 着手。`docs/issues/feat-007-multi-gpu/` に requirements.md / design.md を作成、Codexレビューへ） |
+| feat-007 | マルチGPU運用対応 | 複数人共用GPUサーバーで、GPU0以外の空いている任意の1GPUを選んで学習・レンダリング・評価を動かせるようにする。**実機検証で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理GPU N に乗ることを確認済み（2026-06-18、コード修正不要）**。本案件は train/render/metrics の全経路がD-NeRFで GPU≠0 完走することの確認と、運用ルールの文書化が主眼 | feat-006 | **Closed**（2026-06-18 完了。D-NeRF bouncingballs を GPU index=1 / port 6107 で実機検証し、train→render→metrics の3経路が exit 0 完走〔PSNR 40.71・feat-006 と整合〕。FR-004 でプロセスが物理GPU1のみに乗り他GPUに漏れないことを uuid 照合で確認、FR-006 本体コード差分ゼロ。運用ルールを CLAUDE.md「マルチGPU運用ルール」節に明文化。`docs/issues/feat-007-multi-gpu/`） |
 
 **判定基準（案）**: `CUDA_VISIBLE_DEVICES=<0以外の空きGPU>` を付けて train.py / render.py / metrics.py をD-NeRFで実行し、(1) 指定した物理GPUにのみ負荷が乗る（nvidia-smiで確認）、(2) 3経路ともクラッシュせず完走する、(3) 運用手順がCLAUDE.md等に明文化される。
 - **背景（調査済み）**: `utils/general_utils.py:139` と `metrics.py:116-117` に `set_device(torch.device("cuda:0"))` のハードコードがあるが、`cuda:0` はCUDA_VISIBLE_DEVICESでマスクされた後の論理デバイス先頭を指すため物理GPU0固定にはならない。**2026-06-18 実機検証済み**: `CUDA_VISIBLE_DEVICES=5` 指定下で当該コードを再現し、プロセスが物理GPU5に乗ることを確認。よってコード変更は原則不要（分散学習機構=DataParallel/DDP等は本体に存在しない）

@@ -40,6 +40,17 @@
 | colmap | **未インストール**（実シーン用。D-NeRF合成シーンでは不要） |
 | リポジトリ | `/data/sakagawa/4DGaussians`（git clone済み） |
 
+## マルチGPU運用ルール（任意GPU選択）
+
+本マシンは A100 × 7 を複数人で共用する。学習・レンダリング・評価は**1 プロセス = 1 GPU**で動かし、空いている任意の GPU を選んで使う（feat-007 で GPU≠0 の3経路完走と負荷限定を実機検証済み。2026-06-18、**コード変更ゼロ**）。
+
+1. **実行前に空き GPU を確認**する: `nvidia-smi --query-gpu=index,pci.bus_id,uuid,memory.used,utilization.gpu --format=csv`。`memory.used` が小さく `utilization.gpu` が低い GPU 番号 N を 1 枚選ぶ。
+2. **実行コマンドには `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=N` を付ける**。`CUDA_DEVICE_ORDER=PCI_BUS_ID` が無いと `nvidia-smi` の index と CUDA の番号がズレうる。同一ジョブの 3 経路（train/render/metrics）は同一 N を使う。
+   例: `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=3 .venv/bin/python train.py ...`
+3. コード内の `cuda:0` / `cuda`（`utils/general_utils.py:139`、`metrics.py:116-117`、`render.py`）は **マスク後の論理デバイス先頭**を指すため物理 GPU N に乗る。**コード変更は不要**。
+4. **分散学習（複数 GPU 同時使用）は本体非対応**。1 ジョブで複数 GPU は使えない。
+5. **学習はポートを使う**（`--port`、既定 6009）。実行前に `ss -ltn | grep :<port>` で空きを確認する。使用中だと `network_gui` の `bind()` が例外処理されておらず**起動時にクラッシュ**する。並行実行時もポートを変える。render/metrics はポートを使わない。
+
 ## 技術スタック
 
 - **詳細**: [docs/TECH_STACK.md](docs/TECH_STACK.md) を参照
@@ -176,7 +187,8 @@ docs/issues/
     ├── README.md              # 概要、ステータス、再現手順
     ├── requirements.md        # 要求仕様書（機能追加時、REQUIREMENTS_STANDARD.md 準拠）
     ├── design.md              # 機能設計書（機能追加時、DESIGN_STANDARD.md 準拠）
-    └── investigation.md       # 不具合の調査・修正計画（BUGFIX_STANDARD.md 準拠）
+    ├── investigation.md       # 不具合の調査・修正計画（BUGFIX_STANDARD.md 準拠）
+    └── reviews/               # Codexレビュー出力（codex-NN.result.md は git 管理、codex-NN.full.log は .gitignore）
 ```
 
 ### 命名規則
