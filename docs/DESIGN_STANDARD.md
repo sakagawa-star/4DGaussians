@@ -19,7 +19,7 @@
 #### 1.3 技術スタック
 - 言語・バージョン（例: Python 3.11）
 - 使用ライブラリとバージョン（例: OpenCV 4.9.0, PyQt6 6.6）
-- パッケージ管理方法（例: micromamba, requirements.txt）
+- パッケージ管理方法（例: uv, pip, requirements.txt）
 - ライブラリの選定理由（簡潔に）
 
 #### 1.4 各機能の詳細設計
