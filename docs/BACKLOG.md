@@ -2,8 +2,15 @@
 
 ## ロードマップ
 
-4DGaussians（CVPR 2024, arXiv:2310.08528）が**正常に動作する環境を構築する**ことが現在の最終目標。
-まずD-NeRF（合成シーン）で「学習 → レンダリング → 評価」が一通り動くことをゴールとし、段階的に積み上げて確認する。
+4DGaussians（CVPR 2024, arXiv:2310.08528）が**正常に動作する環境を構築する**ことが最終目標。
+
+**Phase 0-5（D-NeRF合成シーンの「学習 → レンダリング → 評価」）は 2026-05-25 に完了**し、最小の動作確認が取れた。ここから「**4DGS全体が動く環境**」へ拡張する（2026-06-18 ロードマップ策定）。
+
+全体ゴールは次の2点：
+1. **実装済み4データセット系統すべて**で「学習 → レンダリング → 評価」が動く ― D-NeRF（合成・単眼〔済〕）＋ HyperNeRF（実・単眼）・DyNeRF（実・多視点）・multipleview（多視点）の**実シーン3系統**
+2. **複数人共用GPUサーバーで任意の1GPUを選んで動かせる**（マルチGPU運用）
+
+> **スコープ確定（2026-06-18）**: `dycheck`（本体未実装）と `full_eval.py`（静的シーン MipNeRF-360 等専用で動的シーン非対応）はゴールから**除外**。SIBR_viewers可視化・応用ツール（merge_many_4dgs / export_perframe_3DGS）も**当面除外**（必要時に追加案件化）。詳細は末尾「対象外」節。
 
 各案件は `CLAUDE.md` の機能追加フロー（feat-XXX）に従い、要求仕様書・機能設計書を作成 → レビュー → ユーザー承認 → 実装 → 手動テストの順で進める。**実装前に必ずドキュメントを作成・保存すること。**
 
@@ -78,17 +85,65 @@
 - 異常系: `test/`・`renders/`・対応する `gt/` 画像のいずれかが欠落すると `FileNotFoundError`。`evaluate()` は例外を捕捉して `Unable to compute metrics for model <path>` を出力後に再送出し、非0終了する
 - 各指標（PSNR/SSIM/LPIPS-vgg/LPIPS-alex/MS-SSIM/D-SSIM）が数値出力され、`output/dnerf/bouncingballs/results.json`（と `per_view.json`）が生成される
 - 合格目安は論文（CVPR 2024, arXiv:2310.08528 Table 6）のD-NeRF `bouncingballs` 報告値（PSNR 40.62/SSIM 0.9942/LPIPS 0.0155）と大きく乖離しないこと。**確定した合格閾値（feat-006で論文値・feat-004実測から確定）**: PSNR≥38dB / SSIM≥0.98 / LPIPS-vgg≤0.05 / LPIPS-alex≤0.03 / MS-SSIM≥0.98 / D-SSIM≤0.01。**実測は全てクリア**（PSNR 40.68 等、上のStatus欄参照）
-- **この時点で「D-NeRFが正常動作する環境」の構築完了（2026-05-25 達成）。**
+- **この時点で「D-NeRFが正常動作する環境」の構築完了（2026-05-25 達成）。Phase 0-5 はこれで全て Closed。**
 
 ---
 
-## 対象外（当面）
+> **ここから「4DGS全体が動く環境」への拡張フェーズ（2026-06-18 ロードマップ策定）。** ゴール・スコープは本ファイル冒頭を参照。優先順は「Phase 6（マルチGPU運用）→ Phase 7（COLMAP）→ Phase 8〜10（実シーン3系統）」。各 feat-XXX は着手時に `docs/issues/feat-{number}-{slug}/` を作成する。
+
+### Phase 6: マルチGPU運用対応（任意GPU選択）
+
+| ID | Title | 概要 | 依存 | Status |
+|----|-------|------|------|--------|
+| feat-007 | マルチGPU運用対応 | 複数人共用GPUサーバーで、GPU0以外の空いている任意の1GPUを選んで学習・レンダリング・評価を動かせるようにする。**実機検証で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理GPU N に乗ることを確認済み（2026-06-18、コード修正不要）**。本案件は train/render/metrics の全経路がD-NeRFで GPU≠0 完走することの確認と、運用ルールの文書化が主眼 | feat-006 | **Open** |
+
+**判定基準（案）**: `CUDA_VISIBLE_DEVICES=<0以外の空きGPU>` を付けて train.py / render.py / metrics.py をD-NeRFで実行し、(1) 指定した物理GPUにのみ負荷が乗る（nvidia-smiで確認）、(2) 3経路ともクラッシュせず完走する、(3) 運用手順がCLAUDE.md等に明文化される。
+- **背景（調査済み）**: `utils/general_utils.py:139` と `metrics.py:116-117` に `set_device(torch.device("cuda:0"))` のハードコードがあるが、`cuda:0` はCUDA_VISIBLE_DEVICESでマスクされた後の論理デバイス先頭を指すため物理GPU0固定にはならない。**2026-06-18 実機検証済み**: `CUDA_VISIBLE_DEVICES=5` 指定下で当該コードを再現し、プロセスが物理GPU5に乗ることを確認。よってコード変更は原則不要（分散学習機構=DataParallel/DDP等は本体に存在しない）
+
+### Phase 7: COLMAP環境構築（実シーンの前提）
+
+| ID | Title | 概要 | 依存 | Status |
+|----|-------|------|------|--------|
+| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Open** |
+
+**判定基準（案）**: `colmap --help`（または相当）が通る。`scripts/downsample_point.py`（open3d）が import エラーなく動く。小規模データでCOLMAP（feature_extractor〜mapper）が完走する。**本マシンはcolmap未インストール（CLAUDE.md実行環境表）のため、導入方法〔ソースビルド or 配布バイナリ〕の調査・選定が案件の主眼**
+
+### Phase 8: HyperNeRF動作確認（実シーン・単眼）
+
+| ID | Title | 概要 | 依存 | Status |
+|----|-------|------|------|--------|
+| feat-009 | HyperNeRF動作確認 | 実シーン・単眼の1シーン（例: broom2）で、前処理（`colmap.sh ... hypernerf`＋`downsample_point.py`、または事前生成COLMAP点群のDL）→学習→レンダリング→評価を一通り動かす | feat-008 | **Open** |
+
+**判定基準（案）**: `data/hypernerf/.../` 配下を整備し、`train.py`→`render.py`→`metrics.py` が完走する。データ形式は scene.json/metadata.json/dataset.json/rgb/camera 構造（`scene/dataset_readers.py:readHyperDataInfos`、判定は dataset.json の存在）
+
+### Phase 9: DyNeRF動作確認（実シーン・多視点）
+
+| ID | Title | 概要 | 依存 | Status |
+|----|-------|------|------|--------|
+| feat-010 | DyNeRF動作確認 | 実シーン・多視点の1シーン（例: cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`）→ダウンサンプリング→学習→レンダリング→評価を動かす | feat-008 | **Open** |
+
+**判定基準（案）**: 前処理3段（preprocess_dynerf.py / colmap.sh llff / downsample_point.py）が完走し、`train.py`→`render.py`→`metrics.py` が完走する。ffmpeg（imageio）依存に注意（`scene/dataset_readers.py:readdynerfInfo`、判定は poses_bounds.npy の存在）
+
+### Phase 10: multipleview動作確認（多視点・カスタム）
+
+| ID | Title | 概要 | 依存 | Status |
+|----|-------|------|------|--------|
+| feat-011 | multipleview動作確認 | 多視点カスタムデータで `multipleviewprogress.sh`（フレーム抽出→COLMAP→LLFFポーズ→ダウンサンプリング）→config作成→学習を動かす | feat-008 | **Open** |
+
+**判定基準（案）**: `multipleviewprogress.sh` が完走し `sparse_/`・`points3D_multipleview.ply`・`poses_bounds_multipleview.npy` が生成される。`arguments/multipleview/{name}.py` 作成の上 `train.py` が完走する。LLFF（scikit-image）依存に注意（`scene/dataset_readers.py:readMultipleViewinfos`、判定は points3D_multipleview.ply の存在）
+
+---
+
+## 対象外（スコープ外・2026-06-18 確定）
 
 | 項目 | 理由 |
 |------|------|
-| 実シーン（HyperNeRF / DyNeRF）の学習 | COLMAP導入が前提。まずD-NeRF合成シーンで動作確認する |
-| SIBR_viewers による可視化 | 環境構築の必須要件ではない |
-| マルチGPU分散学習 | 単一GPUで動作確認後に検討 |
+| dycheck データセット | **本体が未実装**（READMEにも `scene/__init__.py` のreaderにも対応経路なし、`arguments/dycheck/` はスケルトンのみ）。動かすには4DGS本体の改修が必要なため環境構築のスコープ外 |
+| full_eval.py による一括評価 | **静的シーン専用**（MipNeRF-360 / Tanks&Temples / Deep Blending）で4DGSの動的シーンには非対応。本プロジェクトの目的（動的シーン）と合致しないため対象外 |
+| SIBR_viewers による可視化 | 環境構築の必須要件ではない。CMakeビルド＋GUI/ポートフォワードが必要。必要になった時点で別途案件化 |
+| 応用ツール（merge_many_4dgs / export_perframe_3DGS） | 学習済みモデルの合成・フレーム別点群書き出し。コア動作の確認後、必要なら案件化 |
+| マルチGPU**分散**学習（複数GPU同時使用） | Phase 6（feat-007）の「任意の1GPU選択」とは別物。本体に分散機構（DataParallel/DDP等）の実装がなく、単一GPU運用で足りるため対象外 |
+| D-NeRF他シーン横展開（lego/mutant等7シーン） | bouncingballsで論文値一致を確認済みのため必須ではない。データは feat-003 で取得済みで、必要なら低コストで追加可能（任意） |
 
 ---
 
