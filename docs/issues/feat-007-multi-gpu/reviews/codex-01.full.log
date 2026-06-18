@@ -1,0 +1,2967 @@
+Reading additional input from stdin...
+OpenAI Codex v0.140.0
+--------
+workdir: /data/sakagawa/4DGaussians
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 019ed8ef-ee8a-7b53-89c3-11bd5c7bbfe6
+--------
+user
+docs/REVIEW_CRITERIA.md の基準に従い、以下のドキュメントをレビューせよ: docs/issues/feat-007-multi-gpu/requirements.md docs/issues/feat-007-multi-gpu/design.md 。瑣末な点へのクソリプはしないで、致命的な点のみ指摘して。発見した問題を重要度(高/中/低)で分類し、修正提案とともに報告すること。
+warning: Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.
+codex
+レビュー基準と対象2ファイルをまず読みます。基準に照らして、実装に進むと破綻しそうな要求・設計上の問題だけに絞って確認します。
+exec
+/bin/bash -lc "sed -n '1,320p' docs/issues/feat-007-multi-gpu/design.md" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,240p' docs/REVIEW_CRITERIA.md" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,260p' docs/issues/feat-007-multi-gpu/requirements.md" in /data/sakagawa/4DGaussians
+ succeeded in 921ms:
+# docs/REVIEW_CRITERIA.md
+
+## レビュー基準
+以下の観点でドキュメントおよびコードをレビューする。
+
+### 1. ドキュメントレビュー
+
+#### 1.1 曖昧性の排除
+- 「適切に」「必要に応じて」「など」等の曖昧表現がないか
+- すべての条件・閾値・パラメータが具体的数値で記述されているか
+
+#### 1.2 エラーハンドリング・境界条件
+- 各機能の異常系（入力不正、モデル読み込み失敗、GPU メモリ不足等）の振る舞いが定義されているか
+- 境界値（0人検出、フレーム範囲外等）の扱いが明記されているか
+
+#### 1.3 技術スタック・依存関係
+- 使用ライブラリとバージョンが明記されているか
+- 外部リソース（チェックポイント・データセットのURL、サブモジュールのリポジトリ、CUDA/PyTorchバージョン）の名前・パスが正確か
+
+#### 1.4 データフロー・I/O定義
+- モジュール間のデータ型・形式が明記されているか（BGR/RGB、テンソル型、shape等）
+- ファイル入出力のパス規約・命名規則が定義されているか
+
+#### 1.5 詳細設計の十分性
+- 実装者が判断に迷う余地がないレベルまで詳細化されているか
+
+### 2. コードレビュー
+
+#### 2.1 重要度分類
+発見した問題を以下の重要度で分類する:
+- **高**: クラッシュ、データ破損、セキュリティ問題、メモリリーク
+- **中**: 潜在的バグ、リソースリーク、未使用コード、型の不整合
+- **低**: コードスタイル、命名、軽微な非効率
+
+#### 2.2 修正対象
+- 重要度:高と中を修正対象とする
+- 重要度:低は報告のみ（修正は任意）
+
+ succeeded in 1002ms:
+# feat-007 機能設計書: マルチGPU運用対応（任意GPU選択）
+
+## 1.1 対応要求マッピング
+
+| 要求 | 内容 | 設計箇所 |
+|------|------|----------|
+| FR-001 | 任意 GPU（N≠0）での学習完走 | §1.4.1 / §1.4.2 |
+| FR-002 | 任意 GPU（N≠0）でのレンダリング完走 | §1.4.1 / §1.4.2 |
+| FR-003 | 任意 GPU（N≠0）での評価完走 | §1.4.1 / §1.4.2 |
+| FR-004 | 指定物理 GPU への負荷限定の確認 | §1.4.3 |
+| FR-005 | マルチGPU運用ルールの文書化 | §1.4.5 |
+| FR-006 | 4DGaussians 本体コードの非改変 | §1.3 / ADR-1 |
+| （全 FR 横断） | エラーハンドリングと境界条件 | §1.4.4 |
+
+本案件は**コードを変更しない**。設計の中心は「`cuda:0` / `cuda` のハードコードがあるにもかかわらず `CUDA_VISIBLE_DEVICES=N` で物理 GPU N に乗る」というデバイス選択メカニズムを明示し、3 経路を GPU≠0 で完走させる手順と、負荷が指定 GPU に限定されることの確認方法、そして運用ルールの文面を確定することにある。
+
+## 1.2 システム構成
+
+### GPU 選択メカニズム（本案件の核心）
+
+```
+環境変数 CUDA_VISIBLE_DEVICES=N
+   │  （プロセス起動時に CUDA ランタイムが解釈）
+   ▼
+物理 GPU N だけがプロセスから可視になる
+   │  物理 GPU N → 論理デバイス cuda:0（先頭に再番号付け）
+   ▼
+本体コードの "cuda:0" / "cuda"（論理先頭）= 物理 GPU N を指す
+   ├─ train.py:424   safe_state() → general_utils.py:139 set_device(cuda:0)
+   ├─ render.py:113  safe_state() → general_utils.py:139 set_device(cuda:0)
+   │                 render.py:66,84 .cuda() / device="cuda"
+   └─ metrics.py:116-117  device=cuda:0; set_device(device)
+```
+
+要点: `cuda:0` は「**マスク後の論理デバイス先頭**」であり「物理 GPU0」ではない。`CUDA_VISIBLE_DEVICES=N` を与えた瞬間、論理 `cuda:0` の実体は物理 GPU N になる。したがってコードを変えずに物理 GPU を選べる（実機検証 2026-06-18 で N=5 を確認済み）。
+
+### GPU 固定箇所（コード全文 grep 結果。これ以外に固定なし）
+
+| ファイル:行 | コード | 経路 |
+|------|------|------|
+| `utils/general_utils.py:139` | `torch.cuda.set_device(torch.device("cuda:0"))`（`safe_state` 内） | train / render |
+| `metrics.py:116` | `device = torch.device("cuda:0")` | metrics |
+| `metrics.py:117` | `torch.cuda.set_device(device)` | metrics |
+| `render.py:66,84` | `view['image'].cuda()` / `device="cuda"` | render |
+
+分散学習機構（`DataParallel`/`DistributedDataParallel`/`torch.distributed`）はコード全文に 0 件。
+
+### ディレクトリ構成（入力と生成パス）
+
+```
+data/dnerf/bouncingballs/                 # 入力（feat-003 取得済み）
+output/dnerf/bouncingballs_feat007/       # 本案件の生成物（feat-004〜006 とは別パス）
+├── point_cloud/iteration_{14000,20000}/point_cloud.ply   # FR-001 学習成果物
+├── test/ours_20000/{renders,gt}/*.png                    # FR-002 レンダリング成果物
+├── video/ours_20000/renders/ + video_rgb.mp4             # FR-002
+├── results.json / per_view.json                          # FR-003 評価成果物
+└── （cfg_args, deformation*.pth 等）
+/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log   # ログ（リポジトリ外）
+```
+
+## 1.3 技術スタック
+
+- 実行: `.venv/bin/python`（Python 3.10、torch 1.13.1+cu116、torchvision 0.14.1+cu116）
+- GPU 選択: 環境変数 `CUDA_VISIBLE_DEVICES`（コード変更なし。ADR-1）
+- 監視: `nvidia-smi`（Driver 565.57.01 同梱、CUDA Toolkit 不要）
+- 設定: `arguments/dnerf/bouncingballs.py`（feat-004〜006 と同一。`_base_ = dnerf_default.py`、iterations=20000 / coarse_iterations=3000）
+- **新規ライブラリ追加なし／コード変更なし**（CLAUDE.md 開発方針、FR-006）
+
+## 1.4 各機能の詳細設計
+
+### 1.4.1 FR-001〜003: 空き GPU の選定と 3 経路の実行手順
+
+**手順 0: 空き GPU の選定（N の決定）**
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
+```
+
+- `memory.used` が十分小さく（目安 < 1000 MiB）`utilization.gpu` が 0% に近い GPU を「空き」とみなす。
+- **N は 0 以外**から 1 枚選ぶ（本案件は「GPU≠0 で動く」ことの実証が目的）。複数空きがあれば最小の N（例: 1）を選ぶ。
+- 選んだ N を 3 経路すべてで共通に使う（学習成果物を同じ GPU 系で生成・評価する必要はないが、検証の一貫性のため同一 N とする）。
+
+**手順 1〜3: 3 経路の実行**（README 記載コマンドと同一。バックグラウンド＋ログ保存、`run_in_background: true` で起動し完走通知で監視。ADR-3）
+
+```bash
+mkdir -p /data/sakagawa/tmp/feat007-multi-gpu
+
+# 1) 学習（--port は 6107 を既定とする。理由は §1.4.4 E4 / ADR-4）
+CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py \
+  -s data/dnerf/bouncingballs --port 6107 \
+  --expname "dnerf/bouncingballs_feat007" \
+  --configs arguments/dnerf/bouncingballs.py \
+  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+
+# 2) レンダリング
+CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py \
+  --model_path "output/dnerf/bouncingballs_feat007/" --skip_train \
+  --configs arguments/dnerf/bouncingballs.py \
+  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+
+# 3) 評価
+CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py \
+  --model_paths output/dnerf/bouncingballs_feat007/ \
+  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+```
+
+- `--expname "dnerf/bouncingballs_feat007"` で出力先を `output/dnerf/bouncingballs_feat007/` に分離（既存 feat-004〜006 成果物を保護。ADR-2）。
+- render/metrics の `--model_path`/`--model_paths` は学習と同じ `output/dnerf/bouncingballs_feat007/` を指す。
+- 各経路は **`CUDA_VISIBLE_DEVICES=N` を行頭に付ける**のが唯一の差分。それ以外は feat-004〜006 と同一コマンド。
+
+### 1.4.2 FR-001〜003: 完走判定
+
+各経路の完走シグナル（feat-004〜006 の判定基準を踏襲）:
+
+| 経路 | 完走判定 |
+|------|----------|
+| 学習 | 終了コード 0。`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` 生成。ログに coarse(〜3000)→fine(〜20000) の進捗と最終 point 数 |
+| レンダリング | 終了コード 0。`test/ours_20000/renders/` に 20 枚の PNG、`video_rgb.mp4` 生成。ログに `point nums:` と iteration_20000 自動選択 |
+| 評価 | 終了コード 0。6 指標が数値 print、`results.json`/`per_view.json` 生成。指標が feat-006 実測と整合（PSNR≈40、桁違いの乖離なし） |
+
+### 1.4.3 FR-004: 指定物理 GPU への負荷限定の確認
+
+学習（手順 1）が稼働中に別シェルで以下を実行する:
+
+```bash
+nvidia-smi                       # Processes 欄で PID と GPU 番号の対応を見る
+# 補助: 当該プロセスの GPU 占有のみ抽出
+nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv
+```
+
+**確認内容**:
+1. `train.py` の Python PID（`train.log` 起動時の PID、または `pgrep -f "train.py.*bouncingballs_feat007"`）を特定する。
+2. `nvidia-smi` の Processes 欄で、その PID が **GPU N の行にのみ**現れる。
+3. GPU0 を含む他 GPU の行に当該 PID が**現れない**。
+4. GPU N の `Memory-Usage` と `GPU-Util` が学習負荷で上昇している。
+
+**判定**: 上記 2〜3 を満たせば「`cuda:0` ハードコードでも物理 GPU0 に漏れず、指定した物理 GPU N にのみ負荷が乗る」ことが実証される（FR-004 合格）。
+**注意**: `nvidia-smi` 全体の index は物理番号。`CUDA_VISIBLE_DEVICES=N` 下のプロセス内では論理 `cuda:0` だが、`nvidia-smi` の Processes 欄は**物理 GPU N**に紐づけて表示する（ここが確認ポイント）。
+
+### 1.4.4 エラーハンドリングと境界条件
+
+| ID | 事象 | 検出 | 設計上の扱い |
+|----|------|------|--------------|
+| E1 | 指定 GPU N が他者使用中で VRAM 不足（OOM） | 学習/レンダリングが `CUDA out of memory` で異常終了 | 実行前 `nvidia-smi`（§1.4.1 手順 0）で空きを確認して回避。発生時は別の空き N で再実行（自動リトライはしない）。`investigation.md` に記録 |
+| E2 | 存在しない GPU 番号 N を指定（例 N=7） | 起動時 `CUDA error: invalid device ordinal` | N は 0〜6 の範囲で指定。誤指定時はコマンド修正のうえ再実行 |
+| E3 | `CUDA_VISIBLE_DEVICES` を付け忘れる | 既定で論理 `cuda:0`＝物理 GPU0 を使い、GPU0 が混雑なら OOM | 運用ルール（§1.4.5）で必須化。3 経路すべてに付ける |
+| E4 | 学習の並行実行でポート衝突 | 2 つ目の `train.py` が `network_gui.init`（既定 6009）で bind 失敗しうる | 学習を並行起動する場合は `--port` を実行ごとに変える（公式 `scripts/*.sh` と同方針）。本案件は単発実行で 6107 を使う。render/metrics はポート不使用のため無関係。**network_gui の bind 失敗時の正確な挙動は U3 で実地確認** |
+| E5 | 学習成果物の出力先が既存と衝突 | `output/dnerf/bouncingballs/` を上書き | `--expname dnerf/bouncingballs_feat007` で別パスに分離（ADR-2）。誤って同一 expname を使わない |
+| E6 | Pillow/numpy 型互換（feat-004 の前例）の再発 | 学習/評価で `TypeError` | feat-004 で `dataset_readers.py:287` を `np.uint8` 修正済み（既適用）。GPU 変更と無関係。再発時はコード変更せず中断・記録 |
+
+自動リトライはしない（requirements §1.4 信頼性）。E1〜E6 で完走しない場合は原因を `investigation.md` に記録し、ユーザー承認のうえ対処する。
+
+### 1.4.5 FR-005: マルチGPU運用ルールの文書化（CLAUDE.md 追記文面案）
+
+`CLAUDE.md` に新節「## マルチGPU運用ルール」を追加する。文面案（実装ステップで CLAUDE.md に反映）:
+
+> ### マルチGPU運用ルール（任意GPU選択）
+>
+> 本マシンは A100 × 7 を複数人で共用する。学習・レンダリング・評価は**1 プロセス = 1 GPU**で動かし、空いている任意の GPU を選んで使う。
+>
+> 1. **実行前に `nvidia-smi` で空き GPU を確認**し、`memory.used` が小さく `utilization.gpu` が低い GPU 番号 N を 1 枚選ぶ。
+> 2. **`CUDA_VISIBLE_DEVICES=N` を付けて実行する**。同一ジョブの 3 経路（train/render/metrics）は同一 N を使う。
+>    例: `CUDA_VISIBLE_DEVICES=3 .venv/bin/python train.py ...`
+> 3. コード内の `cuda:0` / `cuda`（`utils/general_utils.py:139`、`metrics.py:116-117`、`render.py`）は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU N に乗る。**コード変更は不要**（物理 GPU0 固定ではない）。
+> 4. **分散学習（複数 GPU 同時使用）は本体非対応**。1 ジョブで複数 GPU は使えない。
+> 5. **学習を並行実行**する場合は `--port`（既定 6009）を実行ごとに変える（network_gui のポート衝突回避）。render/metrics はポートを使わない。
+
+この文面案は requirements FR-005 の 5 項目と一対一対応する。
+
+## 1.5 状態遷移
+
+ステートフル GUI は無い。本案件のフローは直線的:
+
+```
+[空きGPU確認 nvidia-smi] → N 決定（N≠0）
+   → 学習 train.py (CUDA_VISIBLE_DEVICES=N)  ─（稼働中に別シェルで nvidia-smi → FR-004 負荷限定確認）
+   → [point_cloud.ply 生成・exit 0]
+   → レンダリング render.py (同 N) → [test/renders 20枚・exit 0]
+   → 評価 metrics.py (同 N) → [6指標・results.json・exit 0]
+   → CLAUDE.md にマルチGPU運用ルール節を追記
+   → [全 FR 充足 → クローズ]
+
+異常系: OOM / invalid device ordinal / ポート衝突 / 型エラー → investigation.md 記録 → ユーザー承認のうえ対処
+```
+
+## 1.6 ファイル・ディレクトリ設計
+
+**前提条件（実行前に確認）**:
+- `data/dnerf/bouncingballs/`（feat-003 取得済み）が存在する
+- `.venv` と CUDA 拡張（feat-001/002）が利用可能
+- `dataset_readers.py:287` の `np.uint8` 修正（feat-004）が適用済み
+
+**生成物**: `output/dnerf/bouncingballs_feat007/`（学習・レンダリング・評価成果物。`.gitignore` 管理外・非コミット）。ログは `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`。
+
+**文書更新**: `CLAUDE.md`（マルチGPU運用ルール節を追記）、`docs/BACKLOG.md`（feat-007 を Closed に）。
+
+## 1.7 インターフェース定義
+
+コードは変更しないため新規 API は無い。本案件の「インターフェース」は実行コマンドと環境変数:
+
+- 環境変数: `CUDA_VISIBLE_DEVICES=N`（N=物理 GPU 番号、本案件は N≠0）
+- 学習: `train.py -s <data> --port <port> --expname <name> --configs <cfg>`
+- レンダリング: `render.py --model_path <out> --skip_train --configs <cfg>`
+- 評価: `metrics.py --model_paths <out>`
+- 監視: `nvidia-smi` / `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv`
+
+## 1.8 ログ・デバッグ設計
+
+- ログ保存先: `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`（リポジトリ外、隔離）
+- 着目するログ行:
+  - 学習: coarse/fine の iteration 進捗、`point nums:`、最終 `iteration_20000` 保存、exit 0
+  - レンダリング: `point nums:`、iteration_20000 自動選択、test 20 枚／video 書き出し、exit 0
+  - 評価: `Scene:`/`Method: ours_20000`/6 指標、`results.json` 生成、exit 0
+  - GPU 確認: `nvidia-smi` 出力で当該 PID が GPU N にのみ紐づく（FR-004）
+- 完走後の検証コマンド（手動テスト）:
+  - `ls output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply`
+  - `ls output/dnerf/bouncingballs_feat007/test/ours_20000/renders/ | wc -l`（20）
+  - `.venv/bin/python -c "import json; print(json.load(open('output/dnerf/bouncingballs_feat007/results.json'))['ours_20000'])"`
+  - `git status --short`（本体 `*.py` に差分が無いこと＝FR-006）
+
+## 設計判断の記録（ADR簡易版）
+
+### ADR-1: コードは変更せず `CUDA_VISIBLE_DEVICES` で物理 GPU を選ぶ
+**採用**: `cuda:0` / `cuda` は `CUDA_VISIBLE_DEVICES` でマスクした後の論理先頭を指すため、環境変数だけで物理 GPU を選べる（実機検証 2026-06-18・N=5 で確認）。
+**却下案**: `set_device` の引数を CLI/環境変数で受けるようコード改修する案 → 本体改変（CLAUDE.md 方針違反）かつ不要。公式スクリプトも環境変数方式。
+
+### ADR-2: 検証は専用 expname（`dnerf/bouncingballs_feat007`）で行う
+**採用**: 既存 feat-004〜006 成果物（`output/dnerf/bouncingballs/`、論文値一致を実証済み）を保護するため出力先を分離。
+**却下案**: 既存 `output/dnerf/bouncingballs/` を再利用（学習をスキップし render/metrics のみ GPU≠0 で確認）→ FR-001（学習の GPU≠0 完走）が検証できない。3 経路すべてを GPU≠0 で通すため新規学習する。
+
+### ADR-3: バックグラウンド実行＋ログファイル
+feat-004〜006 と同じ運用。学習は約 10 分かかるためターミナルブロックを避け、完走シグナルで監視する。
+
+### ADR-4: 単発実行の `--port` は 6107 を既定とする
+**採用**: 既定 6009 と公式スクリプトの常用ポート（6066〜6572 帯）を避けた値を 1 つ固定し、他者ジョブとの衝突確率を下げる。本案件は学習を 1 本のみ起動するため固定値で足りる。
+**却下案**: 既定 6009 のまま → 他者が 6009 を使用中だと衝突しうる。明示指定する。
+
+### ADR-5: 検証シーンは bouncingballs（feat-004〜006 と同一）
+論文値・feat-006 実測（PSNR≈40.68）が既知で、GPU 変更による異常を指標で検知しやすい。データも取得済みで追加コスト無し。
+
+### ADR-6: 運用ルールは CLAUDE.md（恒久）＋ design.md（根拠）の二層で記載
+CLAUDE.md は日常運用で参照する簡潔な手順、design.md は背景（論理/物理デバイスの仕組み、固定箇所、ポート理由）を保持する。FR-005 の 5 項目で両者を整合させる。
+
+## 未検証事項（実装時に実地検証）
+
+- U1: `CUDA_VISIBLE_DEVICES=N`（N≠0）で 3 経路がいずれも exit 0 で完走し、成果物が生成されるか
+- U2: 学習稼働中の `nvidia-smi` で当該 PID が物理 GPU N にのみ現れ、GPU0 を含む他 GPU に現れないか（FR-004 の核心）
+- U3: `--port 6107` での network_gui 初期化が正常か。並行実行時のポート衝突挙動（bind 失敗が学習をクラッシュさせるか握りつぶすか）の確認（参考）
+- U4: 評価指標が feat-006 実測（PSNR≈40.68 / SSIM≈0.994 等）と整合するか（GPU 変更で数値が変わらないこと）
+- U5: 本体 `*.py` に差分が出ていないこと（FR-006、`git status`）
+
+ succeeded in 1009ms:
+# feat-007 要求仕様書: マルチGPU運用対応（任意GPU選択）
+
+## 1.1 プロジェクト概要
+
+**何を作るのか**: 複数人で共用する GPU サーバー（A100-SXM4-40GB × 7）上で、4DGaussians の「学習 → レンダリング → 評価」の 3 経路を、**GPU0 以外の空いている任意の 1 枚の GPU を選んで**動かせる運用を確立する。具体的には (1) D-NeRF `bouncingballs` を GPU≠0 で 3 経路完走させて確認し、(2) 指定 GPU にのみ負荷が乗ることを `nvidia-smi` で確認し、(3) GPU 選択・並行実行時のポート衝突回避・分散学習非対応を運用ルールとして文書化する。
+
+**なぜ作るのか**: 本マシンは複数人が共用しており、GPU0 が他者に使われている／空いていないことが常態である。Phase 0-5（D-NeRF 動作確認）は GPU0（`CUDA_VISIBLE_DEVICES=0`）固定で実施したが、共用環境では**空いている任意の GPU を選んで実行できる**必要がある。また Phase 7 以降の実シーン 3 系統（HyperNeRF/DyNeRF/multipleview）も同じ運用で動かすため、ここで運用方式を確定・文書化しておく。
+
+**誰が使うのか**: 本リポジトリで 4DGaussians を学習・評価する開発者（共用サーバー利用者）。
+
+**どこで使うのか**: 本マシン（A100-SXM4-40GB × 7、Driver 565.57.01、CUDA Toolkit 12.8 がグローバル。CUDA 拡張は CUDA 11.6 ビルド、torch 1.13.1+cu116、uv 管理の `.venv`）。
+
+**前提（調査・実機検証で確定済み）**:
+- GPU 固定箇所は `utils/general_utils.py:139`（`safe_state` 内、train/render が呼ぶ）と `metrics.py:116-117`（`__main__`）の 2 か所のみ。いずれも `torch.device("cuda:0")` を `set_device` する。render.py は加えて `device="cuda"` / `.cuda()` を使う。これら `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU0 固定ではない。
+- 本体に分散学習機構（`DataParallel` / `DistributedDataParallel` / `torch.distributed`）は存在しない（コード全文 grep で 0 件）。
+- 公式スクリプト群（`scripts/*.sh`）は既に `export CUDA_VISIBLE_DEVICES=N&&python ...` で GPU 0〜3 を使い分けており、本案件の運用方式は公式の想定と一致する。
+- 2026-06-18 の実機検証で `CUDA_VISIBLE_DEVICES=5` 指定下にプロセスが物理 GPU5 に乗ることを確認済み。
+
+## 1.2 用語定義
+
+- **物理 GPU 番号**: `nvidia-smi` が表示する GPU の通し番号（本マシンは 0〜6）。`CUDA_VISIBLE_DEVICES=N` の N に与える値。
+- **論理デバイス**: PyTorch が見る GPU。`CUDA_VISIBLE_DEVICES=N` を設定すると、物理 GPU N が論理デバイス `cuda:0`（先頭）として見える。本体コードの `cuda:0` / `cuda` はこの論理先頭を指す。
+- **3 経路**: 学習（`train.py`）・レンダリング（`render.py`）・評価（`metrics.py`）の 3 つの実行経路。本プロジェクトの動作確認の単位。
+- **任意 GPU 選択（マルチGPU運用）**: 複数 GPU の中から空いている 1 枚を実行ごとに選んで使う運用。**1 プロセス = 1 GPU**。複数 GPU を 1 ジョブで同時使用する分散学習とは異なる（本案件のスコープ外）。
+- **負荷限定**: あるプロセスが、指定した物理 GPU N にのみ GPU メモリ・利用率を消費し、他 GPU には消費しない状態。
+- **expname**: `train.py --expname` で与える実験名。出力先 `output/{expname}/` を決める。本案件は既存成果物（`output/dnerf/bouncingballs/`、feat-004〜006）を上書きしないため `dnerf/bouncingballs_feat007` を用いる。
+- **network_gui ポート**: `train.py --port`（既定 6009）。学習プロセスが可視化ビューア接続用に `network_gui.init` で開くポート。**学習経路のみ**が使用する（render/metrics は使わない）。
+
+## 1.3 機能要求一覧
+
+### FR-001: 任意 GPU（N≠0）での学習完走
+
+- `CUDA_VISIBLE_DEVICES=N`（N は 0 以外の空き物理 GPU）を付けて `train.py` を D-NeRF `bouncingballs` で実行し、クラッシュせず完走する。
+- 入力: 下記コマンド（実行は `.venv/bin/python` 経由、バックグラウンド＋ログ保存）
+  - `CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py -s data/dnerf/bouncingballs --port 6107 --expname "dnerf/bouncingballs_feat007" --configs arguments/dnerf/bouncingballs.py`
+- 出力: 標準出力に coarse/fine の学習進捗、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_{14000,20000}/point_cloud.ply` ほか成果物
+- 優先度: Must
+- 受け入れ基準: プロセスが終了コード 0 で終了し、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` が生成される（feat-004 の判定基準に準ずる）。`CUDA error: invalid device ordinal` 等の GPU 起因エラーが出ないこと。
+
+### FR-002: 任意 GPU（N≠0）でのレンダリング完走
+
+- FR-001 と**同一の N** で `render.py` を実行し、完走する。
+- 入力: `CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py --model_path "output/dnerf/bouncingballs_feat007/" --skip_train --configs arguments/dnerf/bouncingballs.py`
+- 出力: `output/dnerf/bouncingballs_feat007/test/ours_20000/{renders,gt}/` 各 20 枚、`video/ours_20000/renders/` と各 `video_rgb.mp4`
+- 優先度: Must
+- 受け入れ基準: プロセスが終了コード 0 で終了し、`test/ours_20000/renders/` に 20 枚の PNG が生成される（feat-005 の判定基準に準ずる）。
+
+### FR-003: 任意 GPU（N≠0）での評価完走
+
+- FR-001/002 と**同一の N** で `metrics.py` を実行し、完走する。
+- 入力: `CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py --model_paths output/dnerf/bouncingballs_feat007/`
+- 出力: 標準出力に 6 指標（SSIM/PSNR/LPIPS-vgg/LPIPS-alex/MS-SSIM/D-SSIM）、`output/dnerf/bouncingballs_feat007/{results,per_view}.json`
+- 優先度: Must
+- 受け入れ基準: プロセスが終了コード 0 で終了し、6 指標が数値出力され `results.json` が生成される（feat-006 の判定基準に準ずる）。指標値が feat-006 実測（PSNR≈40.68 等）と整合し、桁違いの乖離（PSNR<30dB 等）がないこと（健全性目安、Should 相当）。
+
+### FR-004: 指定物理 GPU への負荷限定の確認
+
+- FR-001 の学習が GPU N で稼働中に `nvidia-smi` を実行し、当該 Python プロセスが**物理 GPU N にのみ**現れ、GPU0 を含む他 GPU には現れないことを確認する。
+- 入力: 学習稼働中の `nvidia-smi`（プロセス一覧表示）
+- 出力: GPU N の行に当該 PID と GPU メモリ消費が表示され、他 GPU 行に当該 PID が無いことの記録（ログ／スクリーンショット相当のテキスト）
+- 優先度: Must
+- 受け入れ基準: `nvidia-smi` の Processes 欄で当該 PID が GPU N にのみ紐づく。他 GPU（特に GPU0）に当該 PID が無い。これにより「`cuda:0` ハードコードでも物理 GPU0 に漏れない」ことを実証する。
+
+### FR-005: マルチGPU運用ルールの文書化
+
+- 共用サーバーでの任意 GPU 運用手順を `CLAUDE.md` の新節「マルチGPU運用ルール」と本案件 `design.md` に明文化する。
+- 記載必須項目（design §1.4.5 と一致させる）:
+  1. 実行前に `nvidia-smi` で空き GPU を確認し N（≠0、空き 1 枚）を選ぶ
+  2. `CUDA_VISIBLE_DEVICES=N` を付けて train/render/metrics を実行する（同一ジョブの 3 経路は同一 N を使う）
+  3. `cuda:0` / `cuda` は論理デバイス先頭＝マスク後の物理 GPU N を指すため**コード変更は不要**
+  4. 分散学習（複数 GPU 同時使用）は本体非対応＝**1 プロセス 1 GPU**
+  5. 学習を**並行実行**する場合は `--port`（既定 6009）を実行ごとに変える（network_gui ポート衝突回避）。render/metrics はポート不使用
+- 優先度: Must
+- 受け入れ基準: `CLAUDE.md` に上記 5 項目を含む節が存在し、`design.md` §1.4.5 と整合する。
+
+### FR-006: 4DGaussians 本体コードの非改変
+
+- 上記 FR-001〜005 をコード変更なしで達成する。`utils/general_utils.py` / `metrics.py` / `train.py` / `render.py` 等の本体は編集しない。
+- 優先度: Must
+- 受け入れ基準: 本案件のクローズ時点で 4DGaussians 本体（`*.py`）に差分が無い（`git status` / `git diff` で確認）。万一コード変更が不可避と判明した場合は中断し `investigation.md` に記録のうえユーザー承認を得る（CLAUDE.md 開発方針・feat-004 の前例）。
+
+## 1.4 非機能要求
+
+- **対応環境**: A100-SXM4-40GB × 7 のうち**任意の 1 枚**（N=0〜6、ただし検証は N≠0）。`.venv`（Python 3.10、torch 1.13.1+cu116）。CUDA 拡張は CUDA 11.6 ビルド済み。
+- **処理時間**: 動作確認が目的で時間は基準にしない。参考: 学習 約 10 分（feat-004 実績）、レンダリング 約 13 秒（feat-005）、評価 約 62 秒（feat-006）。GPU が変わっても同等を見込む。
+- **VRAM**: 単一ジョブが 40GB に収まること（feat-004〜006 で実証済み。GPU 変更で消費量は変わらない）。
+- **信頼性**: 指定 GPU が他者使用中で OOM／占有の場合は**異常終了とみなし自動リトライしない**。実行前 `nvidia-smi` で空きを確認して回避する。原因は `investigation.md` に記録。
+- **再現性**: GPU 番号 N・ポート・出力先・ログ保存先を design に明記し、`/clear` 後でも同一手順で再実行できること。N は実行時の空き状況で選ぶため可変だが、選び方を手順化する。
+- **隔離性**: ログ等の一時生成物はリポジトリ外（`/data/sakagawa/tmp/feat007-multi-gpu/`）に置く。成果物は `output/dnerf/bouncingballs_feat007/`（`.gitignore` 管理外・非コミット）。
+
+## 1.5 制約条件
+
+- 4DGaussians 本体のコードは変更しない（FR-006、CLAUDE.md 開発方針）。
+- 実行は `.venv/bin/python` 経由とする（システム Python を使わない）。
+- 既存成果物 `output/dnerf/bouncingballs/`（feat-004〜006）を上書きしない。本案件は `output/dnerf/bouncingballs_feat007/` を使う。
+- データ `data/dnerf/bouncingballs/`（feat-003 取得済み）が存在することを前提とする。
+- 新規ライブラリは追加しない。
+- **分散学習（複数 GPU 同時使用）は対象外**（本体非対応、BACKLOG スコープ外）。本案件は「任意の 1 GPU 選択」に限定する。
+- GPU 選択は `CUDA_VISIBLE_DEVICES` で行う（コード内 `set_device` の引数化はしない＝本体改変回避）。
+
+## 1.6 優先順位
+
+1. FR-001・FR-002・FR-003（3 経路の GPU≠0 完走）= Must（MVP の中核）
+2. FR-004（負荷限定の確認）= Must（「物理 GPU0 に漏れない」ことの実証が本案件の肝）
+3. FR-005（運用ルールの文書化）= Must（後続 Phase の前提）
+4. FR-006（コード非改変）= Must（開発方針）
+
+MVP の範囲: FR-001〜004（GPU≠0 で 3 経路が完走し、指定 GPU にのみ負荷が乗ることを確認）。FR-005 はそれを運用知識として定着させる文書化、FR-006 は全 FR に課す制約。Should 相当の品質目安は FR-003 の指標健全性（桁違いの乖離がないこと）のみ。
+
+codex
+対象文書の大枠は把握しました。次に、文書内で実行前提になっているコマンド・引数・出力先・GPU固定箇所が実コードと矛盾していないかだけを確認します。
+exec
+/bin/bash -lc "nl -ba docs/issues/feat-007-multi-gpu/design.md | sed -n '1,280p'" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "nl -ba docs/issues/feat-007-multi-gpu/requirements.md | sed -n '1,220p'" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc 'rg -n "argparse|ArgumentParser|--expname|--model_path|--model_paths|--port|network_gui|safe_state|set_device|cuda:0|CUDA_VISIBLE_DEVICES|skip_train" train.py render.py metrics.py utils/general_utils.py arguments -S' in /data/sakagawa/4DGaussians
+ succeeded in 825ms:
+arguments/__init__.py:12:from argparse import ArgumentParser, Namespace
+arguments/__init__.py:20:    def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
+arguments/__init__.py:152:def get_combined_args(parser : ArgumentParser):
+utils/general_utils.py:118:def safe_state(silent):
+utils/general_utils.py:139:    torch.cuda.set_device(torch.device("cuda:0"))
+metrics.py:22:from argparse import ArgumentParser
+metrics.py:116:    device = torch.device("cuda:0")
+metrics.py:117:    torch.cuda.set_device(device)
+metrics.py:120:    parser = ArgumentParser(description="Training script parameters")
+metrics.py:121:    parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+render.py:21:from utils.general_utils import safe_state
+render.py:22:from argparse import ArgumentParser
+render.py:78:def render_sets(dataset : ModelParams, hyperparam, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, skip_video: bool):
+render.py:86:        if not skip_train:
+render.py:95:    parser = ArgumentParser(description="Testing script parameters")
+render.py:100:    parser.add_argument("--skip_train", action="store_true")
+render.py:113:    safe_state(args.quiet)
+render.py:115:    render_sets(model.extract(args), hyperparam.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.skip_video)
+train.py:17:from gaussian_renderer import render, network_gui
+train.py:20:from utils.general_utils import safe_state
+train.py:24:from argparse import ArgumentParser, Namespace
+train.py:109:        if network_gui.conn == None:
+train.py:110:            network_gui.try_connect()
+train.py:111:        while network_gui.conn != None:
+train.py:114:                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
+train.py:129:                network_gui.send(net_image_bytes, dataset.source_path)
+train.py:134:                network_gui.conn = None
+train.py:396:    parser = ArgumentParser(description="Training script parameters")
+train.py:403:    parser.add_argument('--port', type=int, default=6009)
+train.py:411:    parser.add_argument("--expname", type=str, default = "")
+train.py:424:    safe_state(args.quiet)
+train.py:427:    network_gui.init(args.ip, args.port)
+
+ succeeded in 837ms:
+     1	# feat-007 機能設計書: マルチGPU運用対応（任意GPU選択）
+     2	
+     3	## 1.1 対応要求マッピング
+     4	
+     5	| 要求 | 内容 | 設計箇所 |
+     6	|------|------|----------|
+     7	| FR-001 | 任意 GPU（N≠0）での学習完走 | §1.4.1 / §1.4.2 |
+     8	| FR-002 | 任意 GPU（N≠0）でのレンダリング完走 | §1.4.1 / §1.4.2 |
+     9	| FR-003 | 任意 GPU（N≠0）での評価完走 | §1.4.1 / §1.4.2 |
+    10	| FR-004 | 指定物理 GPU への負荷限定の確認 | §1.4.3 |
+    11	| FR-005 | マルチGPU運用ルールの文書化 | §1.4.5 |
+    12	| FR-006 | 4DGaussians 本体コードの非改変 | §1.3 / ADR-1 |
+    13	| （全 FR 横断） | エラーハンドリングと境界条件 | §1.4.4 |
+    14	
+    15	本案件は**コードを変更しない**。設計の中心は「`cuda:0` / `cuda` のハードコードがあるにもかかわらず `CUDA_VISIBLE_DEVICES=N` で物理 GPU N に乗る」というデバイス選択メカニズムを明示し、3 経路を GPU≠0 で完走させる手順と、負荷が指定 GPU に限定されることの確認方法、そして運用ルールの文面を確定することにある。
+    16	
+    17	## 1.2 システム構成
+    18	
+    19	### GPU 選択メカニズム（本案件の核心）
+    20	
+    21	```
+    22	環境変数 CUDA_VISIBLE_DEVICES=N
+    23	   │  （プロセス起動時に CUDA ランタイムが解釈）
+    24	   ▼
+    25	物理 GPU N だけがプロセスから可視になる
+    26	   │  物理 GPU N → 論理デバイス cuda:0（先頭に再番号付け）
+    27	   ▼
+    28	本体コードの "cuda:0" / "cuda"（論理先頭）= 物理 GPU N を指す
+    29	   ├─ train.py:424   safe_state() → general_utils.py:139 set_device(cuda:0)
+    30	   ├─ render.py:113  safe_state() → general_utils.py:139 set_device(cuda:0)
+    31	   │                 render.py:66,84 .cuda() / device="cuda"
+    32	   └─ metrics.py:116-117  device=cuda:0; set_device(device)
+    33	```
+    34	
+    35	要点: `cuda:0` は「**マスク後の論理デバイス先頭**」であり「物理 GPU0」ではない。`CUDA_VISIBLE_DEVICES=N` を与えた瞬間、論理 `cuda:0` の実体は物理 GPU N になる。したがってコードを変えずに物理 GPU を選べる（実機検証 2026-06-18 で N=5 を確認済み）。
+    36	
+    37	### GPU 固定箇所（コード全文 grep 結果。これ以外に固定なし）
+    38	
+    39	| ファイル:行 | コード | 経路 |
+    40	|------|------|------|
+    41	| `utils/general_utils.py:139` | `torch.cuda.set_device(torch.device("cuda:0"))`（`safe_state` 内） | train / render |
+    42	| `metrics.py:116` | `device = torch.device("cuda:0")` | metrics |
+    43	| `metrics.py:117` | `torch.cuda.set_device(device)` | metrics |
+    44	| `render.py:66,84` | `view['image'].cuda()` / `device="cuda"` | render |
+    45	
+    46	分散学習機構（`DataParallel`/`DistributedDataParallel`/`torch.distributed`）はコード全文に 0 件。
+    47	
+    48	### ディレクトリ構成（入力と生成パス）
+    49	
+    50	```
+    51	data/dnerf/bouncingballs/                 # 入力（feat-003 取得済み）
+    52	output/dnerf/bouncingballs_feat007/       # 本案件の生成物（feat-004〜006 とは別パス）
+    53	├── point_cloud/iteration_{14000,20000}/point_cloud.ply   # FR-001 学習成果物
+    54	├── test/ours_20000/{renders,gt}/*.png                    # FR-002 レンダリング成果物
+    55	├── video/ours_20000/renders/ + video_rgb.mp4             # FR-002
+    56	├── results.json / per_view.json                          # FR-003 評価成果物
+    57	└── （cfg_args, deformation*.pth 等）
+    58	/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log   # ログ（リポジトリ外）
+    59	```
+    60	
+    61	## 1.3 技術スタック
+    62	
+    63	- 実行: `.venv/bin/python`（Python 3.10、torch 1.13.1+cu116、torchvision 0.14.1+cu116）
+    64	- GPU 選択: 環境変数 `CUDA_VISIBLE_DEVICES`（コード変更なし。ADR-1）
+    65	- 監視: `nvidia-smi`（Driver 565.57.01 同梱、CUDA Toolkit 不要）
+    66	- 設定: `arguments/dnerf/bouncingballs.py`（feat-004〜006 と同一。`_base_ = dnerf_default.py`、iterations=20000 / coarse_iterations=3000）
+    67	- **新規ライブラリ追加なし／コード変更なし**（CLAUDE.md 開発方針、FR-006）
+    68	
+    69	## 1.4 各機能の詳細設計
+    70	
+    71	### 1.4.1 FR-001〜003: 空き GPU の選定と 3 経路の実行手順
+    72	
+    73	**手順 0: 空き GPU の選定（N の決定）**
+    74	
+    75	```bash
+    76	nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
+    77	```
+    78	
+    79	- `memory.used` が十分小さく（目安 < 1000 MiB）`utilization.gpu` が 0% に近い GPU を「空き」とみなす。
+    80	- **N は 0 以外**から 1 枚選ぶ（本案件は「GPU≠0 で動く」ことの実証が目的）。複数空きがあれば最小の N（例: 1）を選ぶ。
+    81	- 選んだ N を 3 経路すべてで共通に使う（学習成果物を同じ GPU 系で生成・評価する必要はないが、検証の一貫性のため同一 N とする）。
+    82	
+    83	**手順 1〜3: 3 経路の実行**（README 記載コマンドと同一。バックグラウンド＋ログ保存、`run_in_background: true` で起動し完走通知で監視。ADR-3）
+    84	
+    85	```bash
+    86	mkdir -p /data/sakagawa/tmp/feat007-multi-gpu
+    87	
+    88	# 1) 学習（--port は 6107 を既定とする。理由は §1.4.4 E4 / ADR-4）
+    89	CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py \
+    90	  -s data/dnerf/bouncingballs --port 6107 \
+    91	  --expname "dnerf/bouncingballs_feat007" \
+    92	  --configs arguments/dnerf/bouncingballs.py \
+    93	  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+    94	
+    95	# 2) レンダリング
+    96	CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py \
+    97	  --model_path "output/dnerf/bouncingballs_feat007/" --skip_train \
+    98	  --configs arguments/dnerf/bouncingballs.py \
+    99	  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+   100	
+   101	# 3) 評価
+   102	CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py \
+   103	  --model_paths output/dnerf/bouncingballs_feat007/ \
+   104	  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+   105	```
+   106	
+   107	- `--expname "dnerf/bouncingballs_feat007"` で出力先を `output/dnerf/bouncingballs_feat007/` に分離（既存 feat-004〜006 成果物を保護。ADR-2）。
+   108	- render/metrics の `--model_path`/`--model_paths` は学習と同じ `output/dnerf/bouncingballs_feat007/` を指す。
+   109	- 各経路は **`CUDA_VISIBLE_DEVICES=N` を行頭に付ける**のが唯一の差分。それ以外は feat-004〜006 と同一コマンド。
+   110	
+   111	### 1.4.2 FR-001〜003: 完走判定
+   112	
+   113	各経路の完走シグナル（feat-004〜006 の判定基準を踏襲）:
+   114	
+   115	| 経路 | 完走判定 |
+   116	|------|----------|
+   117	| 学習 | 終了コード 0。`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` 生成。ログに coarse(〜3000)→fine(〜20000) の進捗と最終 point 数 |
+   118	| レンダリング | 終了コード 0。`test/ours_20000/renders/` に 20 枚の PNG、`video_rgb.mp4` 生成。ログに `point nums:` と iteration_20000 自動選択 |
+   119	| 評価 | 終了コード 0。6 指標が数値 print、`results.json`/`per_view.json` 生成。指標が feat-006 実測と整合（PSNR≈40、桁違いの乖離なし） |
+   120	
+   121	### 1.4.3 FR-004: 指定物理 GPU への負荷限定の確認
+   122	
+   123	学習（手順 1）が稼働中に別シェルで以下を実行する:
+   124	
+   125	```bash
+   126	nvidia-smi                       # Processes 欄で PID と GPU 番号の対応を見る
+   127	# 補助: 当該プロセスの GPU 占有のみ抽出
+   128	nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv
+   129	```
+   130	
+   131	**確認内容**:
+   132	1. `train.py` の Python PID（`train.log` 起動時の PID、または `pgrep -f "train.py.*bouncingballs_feat007"`）を特定する。
+   133	2. `nvidia-smi` の Processes 欄で、その PID が **GPU N の行にのみ**現れる。
+   134	3. GPU0 を含む他 GPU の行に当該 PID が**現れない**。
+   135	4. GPU N の `Memory-Usage` と `GPU-Util` が学習負荷で上昇している。
+   136	
+   137	**判定**: 上記 2〜3 を満たせば「`cuda:0` ハードコードでも物理 GPU0 に漏れず、指定した物理 GPU N にのみ負荷が乗る」ことが実証される（FR-004 合格）。
+   138	**注意**: `nvidia-smi` 全体の index は物理番号。`CUDA_VISIBLE_DEVICES=N` 下のプロセス内では論理 `cuda:0` だが、`nvidia-smi` の Processes 欄は**物理 GPU N**に紐づけて表示する（ここが確認ポイント）。
+   139	
+   140	### 1.4.4 エラーハンドリングと境界条件
+   141	
+   142	| ID | 事象 | 検出 | 設計上の扱い |
+   143	|----|------|------|--------------|
+   144	| E1 | 指定 GPU N が他者使用中で VRAM 不足（OOM） | 学習/レンダリングが `CUDA out of memory` で異常終了 | 実行前 `nvidia-smi`（§1.4.1 手順 0）で空きを確認して回避。発生時は別の空き N で再実行（自動リトライはしない）。`investigation.md` に記録 |
+   145	| E2 | 存在しない GPU 番号 N を指定（例 N=7） | 起動時 `CUDA error: invalid device ordinal` | N は 0〜6 の範囲で指定。誤指定時はコマンド修正のうえ再実行 |
+   146	| E3 | `CUDA_VISIBLE_DEVICES` を付け忘れる | 既定で論理 `cuda:0`＝物理 GPU0 を使い、GPU0 が混雑なら OOM | 運用ルール（§1.4.5）で必須化。3 経路すべてに付ける |
+   147	| E4 | 学習の並行実行でポート衝突 | 2 つ目の `train.py` が `network_gui.init`（既定 6009）で bind 失敗しうる | 学習を並行起動する場合は `--port` を実行ごとに変える（公式 `scripts/*.sh` と同方針）。本案件は単発実行で 6107 を使う。render/metrics はポート不使用のため無関係。**network_gui の bind 失敗時の正確な挙動は U3 で実地確認** |
+   148	| E5 | 学習成果物の出力先が既存と衝突 | `output/dnerf/bouncingballs/` を上書き | `--expname dnerf/bouncingballs_feat007` で別パスに分離（ADR-2）。誤って同一 expname を使わない |
+   149	| E6 | Pillow/numpy 型互換（feat-004 の前例）の再発 | 学習/評価で `TypeError` | feat-004 で `dataset_readers.py:287` を `np.uint8` 修正済み（既適用）。GPU 変更と無関係。再発時はコード変更せず中断・記録 |
+   150	
+   151	自動リトライはしない（requirements §1.4 信頼性）。E1〜E6 で完走しない場合は原因を `investigation.md` に記録し、ユーザー承認のうえ対処する。
+   152	
+   153	### 1.4.5 FR-005: マルチGPU運用ルールの文書化（CLAUDE.md 追記文面案）
+   154	
+   155	`CLAUDE.md` に新節「## マルチGPU運用ルール」を追加する。文面案（実装ステップで CLAUDE.md に反映）:
+   156	
+   157	> ### マルチGPU運用ルール（任意GPU選択）
+   158	>
+   159	> 本マシンは A100 × 7 を複数人で共用する。学習・レンダリング・評価は**1 プロセス = 1 GPU**で動かし、空いている任意の GPU を選んで使う。
+   160	>
+   161	> 1. **実行前に `nvidia-smi` で空き GPU を確認**し、`memory.used` が小さく `utilization.gpu` が低い GPU 番号 N を 1 枚選ぶ。
+   162	> 2. **`CUDA_VISIBLE_DEVICES=N` を付けて実行する**。同一ジョブの 3 経路（train/render/metrics）は同一 N を使う。
+   163	>    例: `CUDA_VISIBLE_DEVICES=3 .venv/bin/python train.py ...`
+   164	> 3. コード内の `cuda:0` / `cuda`（`utils/general_utils.py:139`、`metrics.py:116-117`、`render.py`）は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU N に乗る。**コード変更は不要**（物理 GPU0 固定ではない）。
+   165	> 4. **分散学習（複数 GPU 同時使用）は本体非対応**。1 ジョブで複数 GPU は使えない。
+   166	> 5. **学習を並行実行**する場合は `--port`（既定 6009）を実行ごとに変える（network_gui のポート衝突回避）。render/metrics はポートを使わない。
+   167	
+   168	この文面案は requirements FR-005 の 5 項目と一対一対応する。
+   169	
+   170	## 1.5 状態遷移
+   171	
+   172	ステートフル GUI は無い。本案件のフローは直線的:
+   173	
+   174	```
+   175	[空きGPU確認 nvidia-smi] → N 決定（N≠0）
+   176	   → 学習 train.py (CUDA_VISIBLE_DEVICES=N)  ─（稼働中に別シェルで nvidia-smi → FR-004 負荷限定確認）
+   177	   → [point_cloud.ply 生成・exit 0]
+   178	   → レンダリング render.py (同 N) → [test/renders 20枚・exit 0]
+   179	   → 評価 metrics.py (同 N) → [6指標・results.json・exit 0]
+   180	   → CLAUDE.md にマルチGPU運用ルール節を追記
+   181	   → [全 FR 充足 → クローズ]
+   182	
+   183	異常系: OOM / invalid device ordinal / ポート衝突 / 型エラー → investigation.md 記録 → ユーザー承認のうえ対処
+   184	```
+   185	
+   186	## 1.6 ファイル・ディレクトリ設計
+   187	
+   188	**前提条件（実行前に確認）**:
+   189	- `data/dnerf/bouncingballs/`（feat-003 取得済み）が存在する
+   190	- `.venv` と CUDA 拡張（feat-001/002）が利用可能
+   191	- `dataset_readers.py:287` の `np.uint8` 修正（feat-004）が適用済み
+   192	
+   193	**生成物**: `output/dnerf/bouncingballs_feat007/`（学習・レンダリング・評価成果物。`.gitignore` 管理外・非コミット）。ログは `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`。
+   194	
+   195	**文書更新**: `CLAUDE.md`（マルチGPU運用ルール節を追記）、`docs/BACKLOG.md`（feat-007 を Closed に）。
+   196	
+   197	## 1.7 インターフェース定義
+   198	
+   199	コードは変更しないため新規 API は無い。本案件の「インターフェース」は実行コマンドと環境変数:
+   200	
+   201	- 環境変数: `CUDA_VISIBLE_DEVICES=N`（N=物理 GPU 番号、本案件は N≠0）
+   202	- 学習: `train.py -s <data> --port <port> --expname <name> --configs <cfg>`
+   203	- レンダリング: `render.py --model_path <out> --skip_train --configs <cfg>`
+   204	- 評価: `metrics.py --model_paths <out>`
+   205	- 監視: `nvidia-smi` / `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv`
+   206	
+   207	## 1.8 ログ・デバッグ設計
+   208	
+   209	- ログ保存先: `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`（リポジトリ外、隔離）
+   210	- 着目するログ行:
+   211	  - 学習: coarse/fine の iteration 進捗、`point nums:`、最終 `iteration_20000` 保存、exit 0
+   212	  - レンダリング: `point nums:`、iteration_20000 自動選択、test 20 枚／video 書き出し、exit 0
+   213	  - 評価: `Scene:`/`Method: ours_20000`/6 指標、`results.json` 生成、exit 0
+   214	  - GPU 確認: `nvidia-smi` 出力で当該 PID が GPU N にのみ紐づく（FR-004）
+   215	- 完走後の検証コマンド（手動テスト）:
+   216	  - `ls output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply`
+   217	  - `ls output/dnerf/bouncingballs_feat007/test/ours_20000/renders/ | wc -l`（20）
+   218	  - `.venv/bin/python -c "import json; print(json.load(open('output/dnerf/bouncingballs_feat007/results.json'))['ours_20000'])"`
+   219	  - `git status --short`（本体 `*.py` に差分が無いこと＝FR-006）
+   220	
+   221	## 設計判断の記録（ADR簡易版）
+   222	
+   223	### ADR-1: コードは変更せず `CUDA_VISIBLE_DEVICES` で物理 GPU を選ぶ
+   224	**採用**: `cuda:0` / `cuda` は `CUDA_VISIBLE_DEVICES` でマスクした後の論理先頭を指すため、環境変数だけで物理 GPU を選べる（実機検証 2026-06-18・N=5 で確認）。
+   225	**却下案**: `set_device` の引数を CLI/環境変数で受けるようコード改修する案 → 本体改変（CLAUDE.md 方針違反）かつ不要。公式スクリプトも環境変数方式。
+   226	
+   227	### ADR-2: 検証は専用 expname（`dnerf/bouncingballs_feat007`）で行う
+   228	**採用**: 既存 feat-004〜006 成果物（`output/dnerf/bouncingballs/`、論文値一致を実証済み）を保護するため出力先を分離。
+   229	**却下案**: 既存 `output/dnerf/bouncingballs/` を再利用（学習をスキップし render/metrics のみ GPU≠0 で確認）→ FR-001（学習の GPU≠0 完走）が検証できない。3 経路すべてを GPU≠0 で通すため新規学習する。
+   230	
+   231	### ADR-3: バックグラウンド実行＋ログファイル
+   232	feat-004〜006 と同じ運用。学習は約 10 分かかるためターミナルブロックを避け、完走シグナルで監視する。
+   233	
+   234	### ADR-4: 単発実行の `--port` は 6107 を既定とする
+   235	**採用**: 既定 6009 と公式スクリプトの常用ポート（6066〜6572 帯）を避けた値を 1 つ固定し、他者ジョブとの衝突確率を下げる。本案件は学習を 1 本のみ起動するため固定値で足りる。
+   236	**却下案**: 既定 6009 のまま → 他者が 6009 を使用中だと衝突しうる。明示指定する。
+   237	
+   238	### ADR-5: 検証シーンは bouncingballs（feat-004〜006 と同一）
+   239	論文値・feat-006 実測（PSNR≈40.68）が既知で、GPU 変更による異常を指標で検知しやすい。データも取得済みで追加コスト無し。
+   240	
+   241	### ADR-6: 運用ルールは CLAUDE.md（恒久）＋ design.md（根拠）の二層で記載
+   242	CLAUDE.md は日常運用で参照する簡潔な手順、design.md は背景（論理/物理デバイスの仕組み、固定箇所、ポート理由）を保持する。FR-005 の 5 項目で両者を整合させる。
+   243	
+   244	## 未検証事項（実装時に実地検証）
+   245	
+   246	- U1: `CUDA_VISIBLE_DEVICES=N`（N≠0）で 3 経路がいずれも exit 0 で完走し、成果物が生成されるか
+   247	- U2: 学習稼働中の `nvidia-smi` で当該 PID が物理 GPU N にのみ現れ、GPU0 を含む他 GPU に現れないか（FR-004 の核心）
+   248	- U3: `--port 6107` での network_gui 初期化が正常か。並行実行時のポート衝突挙動（bind 失敗が学習をクラッシュさせるか握りつぶすか）の確認（参考）
+   249	- U4: 評価指標が feat-006 実測（PSNR≈40.68 / SSIM≈0.994 等）と整合するか（GPU 変更で数値が変わらないこと）
+   250	- U5: 本体 `*.py` に差分が出ていないこと（FR-006、`git status`）
+
+ succeeded in 874ms:
+     1	# feat-007 要求仕様書: マルチGPU運用対応（任意GPU選択）
+     2	
+     3	## 1.1 プロジェクト概要
+     4	
+     5	**何を作るのか**: 複数人で共用する GPU サーバー（A100-SXM4-40GB × 7）上で、4DGaussians の「学習 → レンダリング → 評価」の 3 経路を、**GPU0 以外の空いている任意の 1 枚の GPU を選んで**動かせる運用を確立する。具体的には (1) D-NeRF `bouncingballs` を GPU≠0 で 3 経路完走させて確認し、(2) 指定 GPU にのみ負荷が乗ることを `nvidia-smi` で確認し、(3) GPU 選択・並行実行時のポート衝突回避・分散学習非対応を運用ルールとして文書化する。
+     6	
+     7	**なぜ作るのか**: 本マシンは複数人が共用しており、GPU0 が他者に使われている／空いていないことが常態である。Phase 0-5（D-NeRF 動作確認）は GPU0（`CUDA_VISIBLE_DEVICES=0`）固定で実施したが、共用環境では**空いている任意の GPU を選んで実行できる**必要がある。また Phase 7 以降の実シーン 3 系統（HyperNeRF/DyNeRF/multipleview）も同じ運用で動かすため、ここで運用方式を確定・文書化しておく。
+     8	
+     9	**誰が使うのか**: 本リポジトリで 4DGaussians を学習・評価する開発者（共用サーバー利用者）。
+    10	
+    11	**どこで使うのか**: 本マシン（A100-SXM4-40GB × 7、Driver 565.57.01、CUDA Toolkit 12.8 がグローバル。CUDA 拡張は CUDA 11.6 ビルド、torch 1.13.1+cu116、uv 管理の `.venv`）。
+    12	
+    13	**前提（調査・実機検証で確定済み）**:
+    14	- GPU 固定箇所は `utils/general_utils.py:139`（`safe_state` 内、train/render が呼ぶ）と `metrics.py:116-117`（`__main__`）の 2 か所のみ。いずれも `torch.device("cuda:0")` を `set_device` する。render.py は加えて `device="cuda"` / `.cuda()` を使う。これら `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU0 固定ではない。
+    15	- 本体に分散学習機構（`DataParallel` / `DistributedDataParallel` / `torch.distributed`）は存在しない（コード全文 grep で 0 件）。
+    16	- 公式スクリプト群（`scripts/*.sh`）は既に `export CUDA_VISIBLE_DEVICES=N&&python ...` で GPU 0〜3 を使い分けており、本案件の運用方式は公式の想定と一致する。
+    17	- 2026-06-18 の実機検証で `CUDA_VISIBLE_DEVICES=5` 指定下にプロセスが物理 GPU5 に乗ることを確認済み。
+    18	
+    19	## 1.2 用語定義
+    20	
+    21	- **物理 GPU 番号**: `nvidia-smi` が表示する GPU の通し番号（本マシンは 0〜6）。`CUDA_VISIBLE_DEVICES=N` の N に与える値。
+    22	- **論理デバイス**: PyTorch が見る GPU。`CUDA_VISIBLE_DEVICES=N` を設定すると、物理 GPU N が論理デバイス `cuda:0`（先頭）として見える。本体コードの `cuda:0` / `cuda` はこの論理先頭を指す。
+    23	- **3 経路**: 学習（`train.py`）・レンダリング（`render.py`）・評価（`metrics.py`）の 3 つの実行経路。本プロジェクトの動作確認の単位。
+    24	- **任意 GPU 選択（マルチGPU運用）**: 複数 GPU の中から空いている 1 枚を実行ごとに選んで使う運用。**1 プロセス = 1 GPU**。複数 GPU を 1 ジョブで同時使用する分散学習とは異なる（本案件のスコープ外）。
+    25	- **負荷限定**: あるプロセスが、指定した物理 GPU N にのみ GPU メモリ・利用率を消費し、他 GPU には消費しない状態。
+    26	- **expname**: `train.py --expname` で与える実験名。出力先 `output/{expname}/` を決める。本案件は既存成果物（`output/dnerf/bouncingballs/`、feat-004〜006）を上書きしないため `dnerf/bouncingballs_feat007` を用いる。
+    27	- **network_gui ポート**: `train.py --port`（既定 6009）。学習プロセスが可視化ビューア接続用に `network_gui.init` で開くポート。**学習経路のみ**が使用する（render/metrics は使わない）。
+    28	
+    29	## 1.3 機能要求一覧
+    30	
+    31	### FR-001: 任意 GPU（N≠0）での学習完走
+    32	
+    33	- `CUDA_VISIBLE_DEVICES=N`（N は 0 以外の空き物理 GPU）を付けて `train.py` を D-NeRF `bouncingballs` で実行し、クラッシュせず完走する。
+    34	- 入力: 下記コマンド（実行は `.venv/bin/python` 経由、バックグラウンド＋ログ保存）
+    35	  - `CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py -s data/dnerf/bouncingballs --port 6107 --expname "dnerf/bouncingballs_feat007" --configs arguments/dnerf/bouncingballs.py`
+    36	- 出力: 標準出力に coarse/fine の学習進捗、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_{14000,20000}/point_cloud.ply` ほか成果物
+    37	- 優先度: Must
+    38	- 受け入れ基準: プロセスが終了コード 0 で終了し、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` が生成される（feat-004 の判定基準に準ずる）。`CUDA error: invalid device ordinal` 等の GPU 起因エラーが出ないこと。
+    39	
+    40	### FR-002: 任意 GPU（N≠0）でのレンダリング完走
+    41	
+    42	- FR-001 と**同一の N** で `render.py` を実行し、完走する。
+    43	- 入力: `CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py --model_path "output/dnerf/bouncingballs_feat007/" --skip_train --configs arguments/dnerf/bouncingballs.py`
+    44	- 出力: `output/dnerf/bouncingballs_feat007/test/ours_20000/{renders,gt}/` 各 20 枚、`video/ours_20000/renders/` と各 `video_rgb.mp4`
+    45	- 優先度: Must
+    46	- 受け入れ基準: プロセスが終了コード 0 で終了し、`test/ours_20000/renders/` に 20 枚の PNG が生成される（feat-005 の判定基準に準ずる）。
+    47	
+    48	### FR-003: 任意 GPU（N≠0）での評価完走
+    49	
+    50	- FR-001/002 と**同一の N** で `metrics.py` を実行し、完走する。
+    51	- 入力: `CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py --model_paths output/dnerf/bouncingballs_feat007/`
+    52	- 出力: 標準出力に 6 指標（SSIM/PSNR/LPIPS-vgg/LPIPS-alex/MS-SSIM/D-SSIM）、`output/dnerf/bouncingballs_feat007/{results,per_view}.json`
+    53	- 優先度: Must
+    54	- 受け入れ基準: プロセスが終了コード 0 で終了し、6 指標が数値出力され `results.json` が生成される（feat-006 の判定基準に準ずる）。指標値が feat-006 実測（PSNR≈40.68 等）と整合し、桁違いの乖離（PSNR<30dB 等）がないこと（健全性目安、Should 相当）。
+    55	
+    56	### FR-004: 指定物理 GPU への負荷限定の確認
+    57	
+    58	- FR-001 の学習が GPU N で稼働中に `nvidia-smi` を実行し、当該 Python プロセスが**物理 GPU N にのみ**現れ、GPU0 を含む他 GPU には現れないことを確認する。
+    59	- 入力: 学習稼働中の `nvidia-smi`（プロセス一覧表示）
+    60	- 出力: GPU N の行に当該 PID と GPU メモリ消費が表示され、他 GPU 行に当該 PID が無いことの記録（ログ／スクリーンショット相当のテキスト）
+    61	- 優先度: Must
+    62	- 受け入れ基準: `nvidia-smi` の Processes 欄で当該 PID が GPU N にのみ紐づく。他 GPU（特に GPU0）に当該 PID が無い。これにより「`cuda:0` ハードコードでも物理 GPU0 に漏れない」ことを実証する。
+    63	
+    64	### FR-005: マルチGPU運用ルールの文書化
+    65	
+    66	- 共用サーバーでの任意 GPU 運用手順を `CLAUDE.md` の新節「マルチGPU運用ルール」と本案件 `design.md` に明文化する。
+    67	- 記載必須項目（design §1.4.5 と一致させる）:
+    68	  1. 実行前に `nvidia-smi` で空き GPU を確認し N（≠0、空き 1 枚）を選ぶ
+    69	  2. `CUDA_VISIBLE_DEVICES=N` を付けて train/render/metrics を実行する（同一ジョブの 3 経路は同一 N を使う）
+    70	  3. `cuda:0` / `cuda` は論理デバイス先頭＝マスク後の物理 GPU N を指すため**コード変更は不要**
+    71	  4. 分散学習（複数 GPU 同時使用）は本体非対応＝**1 プロセス 1 GPU**
+    72	  5. 学習を**並行実行**する場合は `--port`（既定 6009）を実行ごとに変える（network_gui ポート衝突回避）。render/metrics はポート不使用
+    73	- 優先度: Must
+    74	- 受け入れ基準: `CLAUDE.md` に上記 5 項目を含む節が存在し、`design.md` §1.4.5 と整合する。
+    75	
+    76	### FR-006: 4DGaussians 本体コードの非改変
+    77	
+    78	- 上記 FR-001〜005 をコード変更なしで達成する。`utils/general_utils.py` / `metrics.py` / `train.py` / `render.py` 等の本体は編集しない。
+    79	- 優先度: Must
+    80	- 受け入れ基準: 本案件のクローズ時点で 4DGaussians 本体（`*.py`）に差分が無い（`git status` / `git diff` で確認）。万一コード変更が不可避と判明した場合は中断し `investigation.md` に記録のうえユーザー承認を得る（CLAUDE.md 開発方針・feat-004 の前例）。
+    81	
+    82	## 1.4 非機能要求
+    83	
+    84	- **対応環境**: A100-SXM4-40GB × 7 のうち**任意の 1 枚**（N=0〜6、ただし検証は N≠0）。`.venv`（Python 3.10、torch 1.13.1+cu116）。CUDA 拡張は CUDA 11.6 ビルド済み。
+    85	- **処理時間**: 動作確認が目的で時間は基準にしない。参考: 学習 約 10 分（feat-004 実績）、レンダリング 約 13 秒（feat-005）、評価 約 62 秒（feat-006）。GPU が変わっても同等を見込む。
+    86	- **VRAM**: 単一ジョブが 40GB に収まること（feat-004〜006 で実証済み。GPU 変更で消費量は変わらない）。
+    87	- **信頼性**: 指定 GPU が他者使用中で OOM／占有の場合は**異常終了とみなし自動リトライしない**。実行前 `nvidia-smi` で空きを確認して回避する。原因は `investigation.md` に記録。
+    88	- **再現性**: GPU 番号 N・ポート・出力先・ログ保存先を design に明記し、`/clear` 後でも同一手順で再実行できること。N は実行時の空き状況で選ぶため可変だが、選び方を手順化する。
+    89	- **隔離性**: ログ等の一時生成物はリポジトリ外（`/data/sakagawa/tmp/feat007-multi-gpu/`）に置く。成果物は `output/dnerf/bouncingballs_feat007/`（`.gitignore` 管理外・非コミット）。
+    90	
+    91	## 1.5 制約条件
+    92	
+    93	- 4DGaussians 本体のコードは変更しない（FR-006、CLAUDE.md 開発方針）。
+    94	- 実行は `.venv/bin/python` 経由とする（システム Python を使わない）。
+    95	- 既存成果物 `output/dnerf/bouncingballs/`（feat-004〜006）を上書きしない。本案件は `output/dnerf/bouncingballs_feat007/` を使う。
+    96	- データ `data/dnerf/bouncingballs/`（feat-003 取得済み）が存在することを前提とする。
+    97	- 新規ライブラリは追加しない。
+    98	- **分散学習（複数 GPU 同時使用）は対象外**（本体非対応、BACKLOG スコープ外）。本案件は「任意の 1 GPU 選択」に限定する。
+    99	- GPU 選択は `CUDA_VISIBLE_DEVICES` で行う（コード内 `set_device` の引数化はしない＝本体改変回避）。
+   100	
+   101	## 1.6 優先順位
+   102	
+   103	1. FR-001・FR-002・FR-003（3 経路の GPU≠0 完走）= Must（MVP の中核）
+   104	2. FR-004（負荷限定の確認）= Must（「物理 GPU0 に漏れない」ことの実証が本案件の肝）
+   105	3. FR-005（運用ルールの文書化）= Must（後続 Phase の前提）
+   106	4. FR-006（コード非改変）= Must（開発方針）
+   107	
+   108	MVP の範囲: FR-001〜004（GPU≠0 で 3 経路が完走し、指定 GPU にのみ負荷が乗ることを確認）。FR-005 はそれを運用知識として定着させる文書化、FR-006 は全 FR に課す制約。Should 相当の品質目安は FR-003 の指標健全性（桁違いの乖離がないこと）のみ。
+
+codex
+ここまででは、GPUマスク方式自体は実コードと大きく矛盾していません。致命度が出る可能性があるのは、文書が「完走確認できる」としている実行手順そのものなので、引数処理と出力ディレクトリ生成をもう少し絞って見ます。
+exec
+/bin/bash -lc "sed -n '1,230p' arguments/__init__.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,170p' metrics.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '360,455p' train.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,140p' render.py" in /data/sakagawa/4DGaussians
+ succeeded in 1219ms:
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+from argparse import ArgumentParser, Namespace
+import sys
+import os
+
+class GroupParams:
+    pass
+
+class ParamGroup:
+    def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
+        group = parser.add_argument_group(name)
+        for key, value in vars(self).items():
+            shorthand = False
+            if key.startswith("_"):
+                shorthand = True
+                key = key[1:]
+            t = type(value)
+            value = value if not fill_none else None 
+            if shorthand:
+                if t == bool:
+                    group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
+                else:
+                    group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=t)
+            else:
+                if t == bool:
+                    group.add_argument("--" + key, default=value, action="store_true")
+                else:
+                    group.add_argument("--" + key, default=value, type=t)
+
+    def extract(self, args):
+        group = GroupParams()
+        for arg in vars(args).items():
+            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):
+                setattr(group, arg[0], arg[1])
+        return group
+
+class ModelParams(ParamGroup): 
+    def __init__(self, parser, sentinel=False):
+        self.sh_degree = 3
+        self._source_path = ""
+        self._model_path = ""
+        self._images = "images"
+        self._resolution = -1
+        self._white_background = True
+        self.data_device = "cuda"
+        self.eval = True
+        self.render_process=False
+        self.add_points=False
+        self.extension=".png"
+        self.llffhold=8
+        super().__init__(parser, "Loading Parameters", sentinel)
+
+    def extract(self, args):
+        g = super().extract(args)
+        g.source_path = os.path.abspath(g.source_path)
+        return g
+
+class PipelineParams(ParamGroup):
+    def __init__(self, parser):
+        self.convert_SHs_python = False
+        self.compute_cov3D_python = False
+        self.debug = False
+        super().__init__(parser, "Pipeline Parameters")
+class ModelHiddenParams(ParamGroup):
+    def __init__(self, parser):
+        self.net_width = 64 # width of deformation MLP, larger will increase the rendering quality and decrase the training/rendering speed.
+        self.timebase_pe = 4 # useless
+        self.defor_depth = 1 # depth of deformation MLP, larger will increase the rendering quality and decrase the training/rendering speed.
+        self.posebase_pe = 10 # useless
+        self.scale_rotation_pe = 2 # useless
+        self.opacity_pe = 2 # useless
+        self.timenet_width = 64 # useless
+        self.timenet_output = 32 # useless
+        self.bounds = 1.6 
+        self.plane_tv_weight = 0.0001 # TV loss of spatial grid
+        self.time_smoothness_weight = 0.01 # TV loss of temporal grid
+        self.l1_time_planes = 0.0001  # TV loss of temporal grid
+        self.kplanes_config = {
+                             'grid_dimensions': 2,
+                             'input_coordinate_dim': 4,
+                             'output_coordinate_dim': 32,
+                             'resolution': [64, 64, 64, 25]  # [64,64,64]: resolution of spatial grid. 25: resolution of temporal grid, better to be half length of dynamic frames
+                            }
+        self.multires = [1, 2, 4, 8] # multi resolution of voxel grid
+        self.no_dx=False # cancel the deformation of Gaussians' position
+        self.no_grid=False # cancel the spatial-temporal hexplane.
+        self.no_ds=False # cancel the deformation of Gaussians' scaling
+        self.no_dr=False # cancel the deformation of Gaussians' rotations
+        self.no_do=True # cancel the deformation of Gaussians' opacity
+        self.no_dshs=True # cancel the deformation of SH colors.
+        self.empty_voxel=False # useless
+        self.grid_pe=0 # useless, I was trying to add positional encoding to hexplane's features
+        self.static_mlp=False # useless
+        self.apply_rotation=False # useless
+
+        
+        super().__init__(parser, "ModelHiddenParams")
+        
+class OptimizationParams(ParamGroup):
+    def __init__(self, parser):
+        self.dataloader=False
+        self.zerostamp_init=False
+        self.custom_sampler=None
+        self.iterations = 30_000
+        self.coarse_iterations = 3000
+        self.position_lr_init = 0.00016
+        self.position_lr_final = 0.0000016
+        self.position_lr_delay_mult = 0.01
+        self.position_lr_max_steps = 20_000
+        self.deformation_lr_init = 0.00016
+        self.deformation_lr_final = 0.000016
+        self.deformation_lr_delay_mult = 0.01
+        self.grid_lr_init = 0.0016
+        self.grid_lr_final = 0.00016
+
+        self.feature_lr = 0.0025
+        self.opacity_lr = 0.05
+        self.scaling_lr = 0.005
+        self.rotation_lr = 0.001
+        self.percent_dense = 0.01
+        self.lambda_dssim = 0
+        self.lambda_lpips = 0
+        self.weight_constraint_init= 1
+        self.weight_constraint_after = 0.2
+        self.weight_decay_iteration = 5000
+        self.opacity_reset_interval = 3000
+        self.densification_interval = 100
+        self.densify_from_iter = 500
+        self.densify_until_iter = 15_000
+        self.densify_grad_threshold_coarse = 0.0002
+        self.densify_grad_threshold_fine_init = 0.0002
+        self.densify_grad_threshold_after = 0.0002
+        self.pruning_from_iter = 500
+        self.pruning_interval = 100
+        self.opacity_threshold_coarse = 0.005
+        self.opacity_threshold_fine_init = 0.005
+        self.opacity_threshold_fine_after = 0.005
+        self.batch_size=1
+        self.add_point=False
+        super().__init__(parser, "Optimization Parameters")
+
+def get_combined_args(parser : ArgumentParser):
+    cmdlne_string = sys.argv[1:]
+    cfgfile_string = "Namespace()"
+    args_cmdline = parser.parse_args(cmdlne_string)
+
+    try:
+        cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
+        print("Looking for config file in", cfgfilepath)
+        with open(cfgfilepath) as cfg_file:
+            print("Config file found: {}".format(cfgfilepath))
+            cfgfile_string = cfg_file.read()
+    except TypeError:
+        print("Config file not found at")
+        pass
+    args_cfgfile = eval(cfgfile_string)
+
+    merged_dict = vars(args_cfgfile).copy()
+    for k,v in vars(args_cmdline).items():
+        if v != None:
+            merged_dict[k] = v
+    return Namespace(**merged_dict)
+
+ succeeded in 1181ms:
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+from pathlib import Path
+import os
+from PIL import Image
+import torch
+import torchvision.transforms.functional as tf
+from utils.loss_utils import ssim
+from lpipsPyTorch import lpips
+import json
+from tqdm import tqdm
+from utils.image_utils import psnr
+from argparse import ArgumentParser
+from pytorch_msssim import ms_ssim
+def readImages(renders_dir, gt_dir):
+    renders = []
+    gts = []
+    image_names = []
+    for fname in os.listdir(renders_dir):
+        render = Image.open(renders_dir / fname)
+        gt = Image.open(gt_dir / fname)
+        renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
+        gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3, :, :].cuda())
+        image_names.append(fname)
+    return renders, gts, image_names
+
+def evaluate(model_paths):
+
+    full_dict = {}
+    per_view_dict = {}
+    full_dict_polytopeonly = {}
+    per_view_dict_polytopeonly = {}
+    print("")
+
+    for scene_dir in model_paths:
+        try:
+            print("Scene:", scene_dir)
+            full_dict[scene_dir] = {}
+            per_view_dict[scene_dir] = {}
+            full_dict_polytopeonly[scene_dir] = {}
+            per_view_dict_polytopeonly[scene_dir] = {}
+
+            test_dir = Path(scene_dir) / "test"
+
+            for method in os.listdir(test_dir):
+                print("Method:", method)
+
+                full_dict[scene_dir][method] = {}
+                per_view_dict[scene_dir][method] = {}
+                full_dict_polytopeonly[scene_dir][method] = {}
+                per_view_dict_polytopeonly[scene_dir][method] = {}
+
+                method_dir = test_dir / method
+                gt_dir = method_dir/ "gt"
+                renders_dir = method_dir / "renders"
+                renders, gts, image_names = readImages(renders_dir, gt_dir)
+
+                ssims = []
+                psnrs = []
+                lpipss = []
+                lpipsa = []
+                ms_ssims = []
+                Dssims = []
+                for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
+                    ssims.append(ssim(renders[idx], gts[idx]))
+                    psnrs.append(psnr(renders[idx], gts[idx]))
+                    lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
+                    ms_ssims.append(ms_ssim(renders[idx], gts[idx],data_range=1, size_average=True ))
+                    lpipsa.append(lpips(renders[idx], gts[idx], net_type='alex'))
+                    Dssims.append((1-ms_ssims[-1])/2)
+
+                print("Scene: ", scene_dir,  "SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
+                print("Scene: ", scene_dir,  "PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
+                print("Scene: ", scene_dir,  "LPIPS-vgg: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
+                print("Scene: ", scene_dir,  "LPIPS-alex: {:>12.7f}".format(torch.tensor(lpipsa).mean(), ".5"))
+                print("Scene: ", scene_dir,  "MS-SSIM: {:>12.7f}".format(torch.tensor(ms_ssims).mean(), ".5"))
+                print("Scene: ", scene_dir,  "D-SSIM: {:>12.7f}".format(torch.tensor(Dssims).mean(), ".5"))
+
+                full_dict[scene_dir][method].update({"SSIM": torch.tensor(ssims).mean().item(),
+                                                        "PSNR": torch.tensor(psnrs).mean().item(),
+                                                        "LPIPS-vgg": torch.tensor(lpipss).mean().item(),
+                                                        "LPIPS-alex": torch.tensor(lpipsa).mean().item(),
+                                                        "MS-SSIM": torch.tensor(ms_ssims).mean().item(),
+                                                        "D-SSIM": torch.tensor(Dssims).mean().item()},
+
+                                                    )
+                per_view_dict[scene_dir][method].update({"SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
+                                                            "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},
+                                                            "LPIPS-vgg": {name: lp for lp, name in zip(torch.tensor(lpipss).tolist(), image_names)},
+                                                            "LPIPS-alex": {name: lp for lp, name in zip(torch.tensor(lpipsa).tolist(), image_names)},
+                                                            "MS-SSIM": {name: lp for lp, name in zip(torch.tensor(ms_ssims).tolist(), image_names)},
+                                                            "D-SSIM": {name: lp for lp, name in zip(torch.tensor(Dssims).tolist(), image_names)},
+
+                                                            }
+                                                        )
+
+            with open(scene_dir + "/results.json", 'w') as fp:
+                json.dump(full_dict[scene_dir], fp, indent=True)
+            with open(scene_dir + "/per_view.json", 'w') as fp:
+                json.dump(per_view_dict[scene_dir], fp, indent=True)
+        except Exception as e:
+            
+            print("Unable to compute metrics for model", scene_dir)
+            raise e
+
+if __name__ == "__main__":
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+
+    # Set up command line argument parser
+    parser = ArgumentParser(description="Training script parameters")
+    parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+    args = parser.parse_args()
+    evaluate(args.model_paths)
+
+ succeeded in 1200ms:
+                        if tb_writer and (idx < 5):
+                            tb_writer.add_images(stage + "/"+config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                            if iteration == testing_iterations[0]:
+                                tb_writer.add_images(stage + "/"+config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    except:
+                        pass
+                    l1_test += l1_loss(image, gt_image).mean().double()
+                    # mask=viewpoint.mask
+                    
+                    psnr_test += psnr(image, gt_image, mask=None).mean().double()
+                psnr_test /= len(config['cameras'])
+                l1_test /= len(config['cameras'])          
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                # print("sh feature",scene.gaussians.get_features.shape)
+                if tb_writer:
+                    tb_writer.add_scalar(stage + "/"+config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(stage+"/"+config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
+        if tb_writer:
+            tb_writer.add_histogram(f"{stage}/scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            
+            tb_writer.add_scalar(f'{stage}/total_points', scene.gaussians.get_xyz.shape[0], iteration)
+            tb_writer.add_scalar(f'{stage}/deformation_rate', scene.gaussians._deformation_table.sum()/scene.gaussians.get_xyz.shape[0], iteration)
+            tb_writer.add_histogram(f"{stage}/scene/motion_histogram", scene.gaussians._deformation_accum.mean(dim=-1)/100, iteration,max_bins=500)
+        
+        torch.cuda.empty_cache()
+def setup_seed(seed):
+     torch.manual_seed(seed)
+     torch.cuda.manual_seed_all(seed)
+     np.random.seed(seed)
+     random.seed(seed)
+     torch.backends.cudnn.deterministic = True
+if __name__ == "__main__":
+    # Set up command line argument parser
+    # torch.set_default_tensor_type('torch.FloatTensor')
+    torch.cuda.empty_cache()
+    parser = ArgumentParser(description="Training script parameters")
+    setup_seed(6666)
+    lp = ModelParams(parser)
+    op = OptimizationParams(parser)
+    pp = PipelineParams(parser)
+    hp = ModelHiddenParams(parser)
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--debug_from', type=int, default=-1)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[3000,7000,14000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[ 14000, 20000, 30_000, 45000, 60000])
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--expname", type=str, default = "")
+    parser.add_argument("--configs", type=str, default = "")
+    
+    args = parser.parse_args(sys.argv[1:])
+    args.save_iterations.append(args.iterations)
+    if args.configs:
+        import mmcv
+        from utils.params_utils import merge_hparams
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
+    print("Optimizing " + args.model_path)
+
+    # Initialize system state (RNG)
+    safe_state(args.quiet)
+
+    # Start GUI server, configure and run training
+    network_gui.init(args.ip, args.port)
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
+
+    # All done
+    print("\nTraining complete.")
+
+ succeeded in 1227ms:
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+import imageio
+import numpy as np
+import torch
+from scene import Scene
+import os
+import cv2
+from tqdm import tqdm
+from os import makedirs
+from gaussian_renderer import render
+import torchvision
+from utils.general_utils import safe_state
+from argparse import ArgumentParser
+from arguments import ModelParams, PipelineParams, get_combined_args, ModelHiddenParams
+from gaussian_renderer import GaussianModel
+from time import time
+import threading
+import concurrent.futures
+def multithread_write(image_list, path):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=None)
+    def write_image(image, count, path):
+        try:
+            torchvision.utils.save_image(image, os.path.join(path, '{0:05d}'.format(count) + ".png"))
+            return count, True
+        except:
+            return count, False
+        
+    tasks = []
+    for index, image in enumerate(image_list):
+        tasks.append(executor.submit(write_image, image, index, path))
+    executor.shutdown()
+    for index, status in enumerate(tasks):
+        if status == False:
+            write_image(image_list[index], index, path)
+    
+to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, cam_type):
+    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
+    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+
+    makedirs(render_path, exist_ok=True)
+    makedirs(gts_path, exist_ok=True)
+    render_images = []
+    gt_list = []
+    render_list = []
+    print("point nums:",gaussians._xyz.shape[0])
+    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+        if idx == 0:time1 = time()
+        
+        rendering = render(view, gaussians, pipeline, background,cam_type=cam_type)["render"]
+        render_images.append(to8b(rendering).transpose(1,2,0))
+        render_list.append(rendering)
+        if name in ["train", "test"]:
+            if cam_type != "PanopticSports":
+                gt = view.original_image[0:3, :, :]
+            else:
+                gt  = view['image'].cuda()
+            gt_list.append(gt)
+
+    time2=time()
+    print("FPS:",(len(views)-1)/(time2-time1))
+
+    multithread_write(gt_list, gts_path)
+
+    multithread_write(render_list, render_path)
+
+    
+    imageio.mimwrite(os.path.join(model_path, name, "ours_{}".format(iteration), 'video_rgb.mp4'), render_images, fps=30)
+def render_sets(dataset : ModelParams, hyperparam, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, skip_video: bool):
+    with torch.no_grad():
+        gaussians = GaussianModel(dataset.sh_degree, hyperparam)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        cam_type=scene.dataset_type
+        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+        if not skip_train:
+            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background,cam_type)
+
+        if not skip_test:
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background,cam_type)
+        if not skip_video:
+            render_set(dataset.model_path,"video",scene.loaded_iter,scene.getVideoCameras(),gaussians,pipeline,background,cam_type)
+if __name__ == "__main__":
+    # Set up command line argument parser
+    parser = ArgumentParser(description="Testing script parameters")
+    model = ModelParams(parser, sentinel=True)
+    pipeline = PipelineParams(parser)
+    hyperparam = ModelHiddenParams(parser)
+    parser.add_argument("--iteration", default=-1, type=int)
+    parser.add_argument("--skip_train", action="store_true")
+    parser.add_argument("--skip_test", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--skip_video", action="store_true")
+    parser.add_argument("--configs", type=str)
+    args = get_combined_args(parser)
+    print("Rendering " , args.model_path)
+    if args.configs:
+        import mmcv
+        from utils.params_utils import merge_hparams
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
+    # Initialize system state (RNG)
+    safe_state(args.quiet)
+
+    render_sets(model.extract(args), hyperparam.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.skip_video)
+codex
+実コード上、コマンドの引数名は文書と一致しています。次は、要求の「コード非改変」と「文書更新」の範囲が互いに矛盾していないか、既存の方針文書やバックログとの整合だけ確認します。
+exec
+/bin/bash -lc 'rg -n "expname|model_path|output|point_cloud|save" train.py scene arguments utils -S' in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,260p' CLAUDE.md" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc 'rg -n "feat-007|multi|GPU|Closed|Open|Phase|マルチ" docs/BACKLOG.md docs -S' in /data/sakagawa/4DGaussians
+ succeeded in 656ms:
+# CLAUDE.md
+
+このファイルはClaude Codeがプロジェクトを理解するためのガイドです。
+
+## セッション引き継ぎ
+
+- セッション開始時にプロジェクトルートの `.claude/handovers/` ディレクトリを確認し、ファイルが存在すれば最新のものを読み込む
+- セッション終了時や作業の区切りでは `/handover` の実行を促す
+
+## プロジェクト概要
+
+本プロジェクトは、HUST/4DGaussians（4D Gaussian Splatting for Real-Time Dynamic Scene Rendering, CVPR 2024, arXiv:2310.08528）を動作させるための環境構築を行う。
+
+### 現在の最終目的
+
+- **4DGaussiansが正常に動作する環境を構築すること**
+- Phase 0-5（D-NeRF合成シーンの学習・レンダリング・評価）は **2026-05-25 完了**
+- 現在は「**4DGS全体が動く環境**」へ拡張中（2026-06-18 ロードマップ策定）。実装済み4データセット系統すべて（D-NeRF〔済〕＋ HyperNeRF・DyNeRF・multipleview の**実シーン3系統**）で学習〜評価が動くこと、および**複数人共用サーバーでの任意GPU選択（マルチGPU運用）**をゴールとする
+- スコープ外: dycheck（本体未実装）・full_eval（静的シーン専用）・SIBR可視化・応用ツール（詳細は `docs/BACKLOG.md`）
+- 段階的に積み上げて確認する（各Phaseの判定基準を満たしてから次へ）。ロードマップの正本は `docs/BACKLOG.md`
+
+### 背景
+
+- 公式README（`README.md`）はconda + Python 3.7 + PyTorch 1.13.1+cu116 を前提とした手順を案内している
+- 本マシンには **conda が無い** ため、**uv** を用いて環境を構築する（[docs/TECH_STACK.md](docs/TECH_STACK.md) 参照）
+- CUDA拡張（`depth-diff-gaussian-rasterization`, `simple-knn`）のソースビルドが必須であり、これがセットアップの主要難所となる
+- 開発プロセスのルール（要求仕様書・機能設計書・レビュー・不具合修正の基準）は `docs/` 配下に独立して保持する汎用基準を用いる（本リポジトリ内で自己完結し、他プロジェクトに依存しない）
+
+## 実行環境（本マシン）
+
+| 項目 | 値 |
+|------|-----|
+| GPU | NVIDIA A100-SXM4-40GB × 7（Driver 565.57.01）。学習・レンダリングは単一GPUを使用 |
+| CUDA Toolkit | 12.8（`~/cuda/cuda-12.8/`、`~/cuda/current` → `~/cuda/cuda-12.8` のシンボリックリンク） |
+| nvcc | release 12.8, V12.8.93（`nvcc --version` で確認可能） |
+| CUDA環境変数 | `CUDA_HOME=/home/sakagawa/cuda/current`、`PATH` と `LD_LIBRARY_PATH` にcurrent配下を設定済み |
+| システムPython | 3.10.12 |
+| パッケージ管理 | uv 0.11.6（インストール済み） |
+| conda | **未インストール**（公式手順のconda部分はuvで代替する） |
+| colmap | **未インストール**（実シーン用。D-NeRF合成シーンでは不要） |
+| リポジトリ | `/data/sakagawa/4DGaussians`（git clone済み） |
+
+## 技術スタック
+
+- **詳細**: [docs/TECH_STACK.md](docs/TECH_STACK.md) を参照
+- **本プロジェクトの採用版**: Python **3.10**（uv managed）/ torch **1.13.1+cu116** / mmcv 1.6.0 ＋各種ライブラリ（`requirements.txt`）。公式のPython 3.7はuvが提供しないため3.10を採用（根拠はTECH_STACK.md）
+- **公式要件（参考）**: Python 3.7 / PyTorch 1.13.1+cu116 / mmcv 1.6.0（conda前提のオリジナル手順）
+- **CUDA拡張**: `submodules/depth-diff-gaussian-rasterization`（深度対応版、ingra14m fork）、`submodules/simple-knn`
+- **CUDA整合（決定済み）**: CUDA拡張のビルドは `/usr/local/cuda-11.6` を使う（torch cu116とメジャー・マイナー一致）。グローバルでアクティブな CUDA 12.8 のままビルドするとメジャー版不一致（12 vs 11）でビルドエラーまたは重大な互換性警告が生じうるため、**ビルド時のみ `CUDA_HOME=/usr/local/cuda-11.6` を上書き**する。詳細は TECH_STACK.md
+
+## サブモジュールの状態
+
+- `submodules/depth-diff-gaussian-rasterization` と `submodules/simple-knn` は **ビルド済み（feat-002, 2026-05-22）**。`git submodule update --init --recursive`（glm含む）取得後、CUDA 11.6・`--no-build-isolation` で editable ビルド。simple-knn は uv editable 向けに `simple_knn/__init__.py`（`import torch`）を追加（git管理外。`docs/issues/feat-002-cuda-ext-build/investigation.md` 参照）
+- `SIBR_viewers`（`.gitmodules` に定義）は可視化ビューア。環境構築の必須要件ではない
+
+## データセット
+
+学習・評価には外部データセットが必要（`data/` 配下、`.gitignore` 管理外を想定）。
+
+- **D-NeRF（合成シーン）**: 最初の動作確認に使用。**取得済み（feat-003, 2026-05-22）**。Dropbox の `data.zip`（246MB）を展開し `data/dnerf/{scene}/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）を配置。各シーンに `transforms_{train,val,test}.json` と `train/`・`val/`・`test/`（png）。本体は train/test のみ読込。`data/` は `.gitignore` 管理外（git未追跡。再取得手順は `docs/issues/feat-003-dnerf-data/design.md` 参照）
+- **HyperNeRF（実シーン）**: colmap 前処理が必要
+- **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要
+
+## オリジナルコードの変更点
+
+4DGaussians 本体は原則変更しない（開発方針）。やむを得ず変更した箇所を以下に記録する（理由の詳細は各案件ドキュメント参照）。
+
+- **`scene/dataset_readers.py:287`（feat-004, 2026-05-22）**: `Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")` の `np.byte`（int8）を `np.uint8` に変更。新しい **Pillow 12.2.0** が `Image.fromarray(..., "RGB")` に int8 配列（`|i1`）を受理せず `TypeError` でクラッシュするため（旧 Pillow は許容）。RGB 値 0〜255 は uint8 が意味的に正しい。Blender(D-NeRF) の train/test 読み込み（学習・レンダリング・評価の全経路）で使用。詳細・ADR は `docs/issues/feat-004-dnerf-train/investigation.md`
+
+## ディレクトリ構成（主要部分）
+
+```
+4DGaussians/
+├── CLAUDE.md               # 本ファイル
+├── README.md               # オリジナルのREADME（公式セットアップ手順）
+├── requirements.txt        # pip依存定義（torch 1.13.1 等、公式・緩いスペック）
+├── requirements.lock.txt   # 依存の厳密スナップショット（uv pip freeze、版の正本。feat-001で生成）
+├── train.py                # 学習エントリポイント
+├── render.py               # レンダリング
+├── metrics.py              # 評価
+├── convert.py / colmap.sh  # COLMAP前処理（実シーン用）
+├── full_eval.py            # 一括評価
+├── export_perframe_3DGS.py # タイムスタンプ別3DGS書き出し
+├── merge_many_4dgs.py      # 学習済み4DGSのマージ
+├── multipleviewprogress.sh # 多視点データのポーズ・点群生成
+├── arguments/              # 学習設定（シーン別Pythonコンフィグ）
+│   ├── dnerf/              # D-NeRF（bouncingballs, lego, mutant 等）
+│   ├── dynerf/             # DyNeRF（Neural 3D Video）
+│   ├── hypernerf/          # HyperNeRF
+│   ├── dycheck/            # DyCheck
+│   └── multipleview/       # 多視点
+├── scene/                  # シーン・データセット・モデル定義
+│   ├── gaussian_model.py   # ガウシアンモデル
+│   ├── deformation.py      # 変形フィールド
+│   ├── hexplane.py         # Multi-resolution HexPlane
+│   ├── dataset_readers.py  # データセット読み込み
+│   └── ...
+├── gaussian_renderer/      # レンダラ（network_gui.py 含む）
+├── utils/                  # 各種ユーティリティ（loss, camera, graphics 等）
+├── lpipsPyTorch/           # LPIPS実装
+├── scripts/                # 前処理・変換・学習補助スクリプト
+│   ├── preprocess_dynerf.py
+│   ├── downsample_point.py
+│   ├── *2colmap.py         # 各データセット→COLMAP変換
+│   └── train_*.sh          # シーン別学習スクリプト
+├── submodules/             # CUDA拡張（要ビルド・初期状態は未初期化）
+│   ├── depth-diff-gaussian-rasterization/
+│   └── simple-knn/
+├── docs/                   # ドキュメント（開発プロセス基準）
+│   ├── BACKLOG.md
+│   ├── BUGFIX_STANDARD.md
+│   ├── DESIGN_STANDARD.md
+│   ├── REQUIREMENTS_STANDARD.md
+│   ├── REVIEW_CRITERIA.md
+│   ├── TECH_STACK.md
+│   ├── viewer_usage.md     # 公式ビューアの使い方（オリジナル）
+│   └── issues/             # 案件ディレクトリ
+└── assets/                 # README用画像等
+```
+
+## 開発方針
+
+- **シンプルな機能を一つずつ作り、積み重ねて目的を達成する**
+- 大きな機能を一度に作らない。小さく作って動作確認し、次へ進む
+- 4DGaussiansのオリジナルコードは可能な限り変更しない。変更が必要な場合は理由を案件ドキュメントに記録する
+- 環境構築は段階的に進める（CUDA拡張ビルド → 学習 → レンダリング → 評価）。各段階で判定基準を満たしてから次へ進む
+
+### 機能追加フロー（feat-XXX 案件）
+
+新機能や新しい環境構築ステップを進める場合、以下のフローを**厳守**する。**planモードは使わない**（通常モードで調査・計画を行う）。
+
+1. **案件作成** → `docs/issues/feat-{number}-{slug}/` フォルダを作成し、`docs/BACKLOG.md` に追加する
+2. **調査・計画** → 通常モードで既存コード・公式手順を調査し、要求仕様書（`docs/REQUIREMENTS_STANDARD.md` 準拠）と機能設計書（`docs/DESIGN_STANDARD.md` 準拠）を作成する
+3. **ドキュメント保存** → 要求仕様書を `docs/issues/{案件フォルダ}/requirements.md`、機能設計書を `docs/issues/{案件フォルダ}/design.md` にファイル保存する。**保存が完了するまで実装に進んではならない**
+4. **レビュー（Codex + 人）** → 保存されたドキュメントを **Codex** でレビューする。実行方法は後述の「Codexによるレビューの実行方法」を参照。ユーザーも同時にレビューする。レビュー実行時は `docs/REVIEW_CRITERIA.md` の基準に従うこと
+5. **修正（必要な場合）** → レビューで問題があれば、再調査してドキュメントを更新する。**ステップ2〜4を問題がなくなるまで繰り返す**
+6. **実装** → ドキュメント（要求仕様書・機能設計書・CLAUDE.md）を読んで実装する。実装完了後、動作確認を実行する
+7. **手動テスト** → ユーザーがテストする。以下の問題があれば `docs/BUGFIX_STANDARD.md` に従って修正計画を `docs/issues/{案件フォルダ}/investigation.md` に追記する（上書きしない。イテレーション番号を付けて履歴を残す）。**ユーザーの承認を得た上で、ステップ2〜7を繰り返す**（コード修正はステップ6で行う。ステップ7で直接コードを編集してはならない）
+   - 不具合の発見
+   - 要求通りに実装されていない
+   - 要求仕様作成時のヒアリング漏れ
+8. **完了** → `docs/BACKLOG.md` のステータスを Closed に更新する。ファイルの追加・削除があった場合は `CLAUDE.md` のディレクトリ構成を最新に更新する
+
+### 不具合修正フロー（bug-XXX 案件）
+
+既存機能・既存環境の不具合を修正する場合、以下のフローを**厳守**する。
+
+1. **案件作成** → `docs/issues/bug-{number}-{slug}/` フォルダを作成し、`docs/BACKLOG.md` に追加する。`README.md` に不具合の概要と再現手順を記録する
+2. **調査・修正計画** → `docs/BUGFIX_STANDARD.md` に従い、既存コードを調査する。修正計画を `docs/issues/{案件フォルダ}/investigation.md` に記録する。**この時点でコードを編集してはならない**
+3. **ドキュメント保存** → investigation.md の保存を確認する。**保存が完了するまで実装に進んではならない**
+4. **レビュー（Codex + 人）** → 保存されたドキュメントを **Codex** でレビューする。実行方法は後述の「Codexによるレビューの実行方法」を参照。ユーザーも同時にレビューする。レビュー実行時は `docs/REVIEW_CRITERIA.md` の基準に従うこと
+5. **修正（必要な場合）** → レビューで問題があれば、再調査してドキュメントを更新する。**ステップ2〜4を問題がなくなるまで繰り返す**
+6. **実装** → 承認された修正計画に沿ってコードを修正する。計画にない変更が必要になった場合は中断して報告する
+7. **手動テスト** → ユーザーがテストする。問題があれば `docs/BUGFIX_STANDARD.md` に従って investigation.md にイテレーション番号を付けて追記し、**ユーザーの承認を得た上で、ステップ2〜7を繰り返す**（コード修正はステップ6で行う。ステップ7で直接コードを編集してはならない）
+8. **完了** → `docs/BACKLOG.md` のステータスを Closed に更新する。ファイルの追加・削除があった場合は `CLAUDE.md` のディレクトリ構成を最新に更新する
+
+### ドキュメント作成ルール
+
+- **実装前に必ずドキュメントを作成し、案件フォルダにファイル保存すること**
+- ドキュメントが保存されていない場合は、**実装を中止**する
+- 機能追加時: 要求仕様書（`docs/REQUIREMENTS_STANDARD.md` 準拠）と機能設計書（`docs/DESIGN_STANDARD.md` 準拠）を作成する
+- 不具合修正時: `docs/BUGFIX_STANDARD.md` の基準に従い、修正計画を `investigation.md` に記録する
+- レビュー実行時は `docs/REVIEW_CRITERIA.md` の基準に従うこと
+- ドキュメントは `docs/issues/{案件フォルダ}/` に置く（`requirements.md`, `design.md`, `investigation.md`）
+- **/clear 後でも実装がスムーズにできるよう、必要な情報を全て記述する**
+- 暗黙知に頼らず、**自己完結したドキュメント**にする（前の会話コンテキストがなくても実装できること）
+- ライブラリの追加・変更・削除を行った場合は `docs/TECH_STACK.md` を更新し、**`requirements.lock.txt` を `uv pip freeze` で再生成**すること
+- 新規ライブラリ導入時は用途・選定理由・バージョンを `TECH_STACK.md` に追記すること
+- **uv 依存管理ルール（厳守）**: パッケージ追加は常に `uv pip install`（追加的）で行い、**`uv sync` / `uv pip sync` は使わない**（未宣言パッケージを削除し環境を破壊するため）。`pyproject.toml` は作らない。背景・詳細・依存記録の役割分担は `docs/TECH_STACK.md`「uv 依存管理ルール」を参照
+
+### 案件ディレクトリ構成
+
+```
+docs/issues/
+└── {type}-{number}-{slug}/    # 例: feat-001-env-setup, bug-001-xxx
+    ├── README.md              # 概要、ステータス、再現手順
+    ├── requirements.md        # 要求仕様書（機能追加時、REQUIREMENTS_STANDARD.md 準拠）
+    ├── design.md              # 機能設計書（機能追加時、DESIGN_STANDARD.md 準拠）
+    └── investigation.md       # 不具合の調査・修正計画（BUGFIX_STANDARD.md 準拠）
+```
+
+### 命名規則
+
+- フォルダ名は英語で統一（例: `feat-001-env-setup`, `bug-001-rasterizer-build-fail`）
+- 案件フォルダは完了後も削除・移動しない
+
+### Codexによるレビューの実行方法
+
+機能追加・不具合修正フローのステップ4（レビュー）では、Claude Code 自身が `codex exec` コマンドを実行して Codex にレビューさせる。Subagent は使わない。
+
+使用するモデルは `~/.codex/config.toml` のデフォルト設定に従う。本ファイルのコマンドにはモデル指定（`-m`）を書かない。モデルを切り替えたい場合は `~/.codex/config.toml` を編集する（全プロジェクト共通で反映される）。
+
+#### 初回レビュー（機能追加の場合）
+
+```bash
+codex exec "docs/REVIEW_CRITERIA.md の基準に従い、以下のドキュメントをレビューせよ: docs/issues/{案件フォルダ}/requirements.md docs/issues/{案件フォルダ}/design.md 。瑣末な点へのクソリプはしないで、致命的な点のみ指摘して。発見した問題を重要度(高/中/低)で分類し、修正提案とともに報告すること。"
+```
+
+#### 初回レビュー（不具合修正の場合）
+
+```bash
+codex exec "docs/REVIEW_CRITERIA.md および docs/BUGFIX_STANDARD.md の基準に従い、以下のドキュメントをレビューせよ: docs/issues/{案件フォルダ}/investigation.md 。瑣末な点へのクソリプはしないで、致命的な点のみ指摘して。発見した問題を重要度(高/中/低)で分類し、修正提案とともに報告すること。"
+```
+
+#### 再レビュー（共通）
+
+ドキュメントを更新して再レビューする場合、最初のレビューの文脈を保持するため `resume --last` を使う:
+
+```bash
+codex exec resume --last "ドキュメントを更新したので再レビューして。前回と同じ基準で。瑣末な点へのクソリプはしないで、致命的な点のみ指摘して。重要度(高/中/低)で分類し、修正提案とともに報告すること。"
+```
+
+**注意**: `resume --last` を付けないと最初のレビューの文脈が失われる。
+
+#### レビュー終了条件
+
+重要度「高」「中」の指摘がなくなるまで、修正 → 再レビューを繰り返す。「低」のみになったら人レビューに進む。
+
+### コードレビュー
+
+- レビューでは重要度(高/中/低)で分類し、修正提案とともに報告する
+- 重要度:高と中は修正対象とする
+- レビュー基準の詳細は `docs/REVIEW_CRITERIA.md` を参照
+
+## Claude Code 運用ルール
+
+### Bash 実行時のルール
+
+- **`cd <path> && <command>` の連結は禁止。** Bashツールはプロジェクト作業ディレクトリで動くため `cd` は不要。連結すると先頭トークンが `cd` になり、`.claude/settings.json` / `.claude/settings.local.json` のallowlist（例: `Bash(codex exec *)`、`Bash(git status)`）が一致せず、毎回パーミッションプロンプトが発生する
+- 別ディレクトリで実行する必要がある場合は、コマンド側のオプションを使う（例: `git -C <path> status`、`make -C <path> ...`）
+- どうしても複数コマンド連結が必要な場合も、先頭トークンが安全・許可済みであるかを確認してから書く
+
+ succeeded in 1179ms:
+utils/system_utils.py:27:    saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
+utils/system_utils.py:28:    return max(saved_iters)
+utils/scene_utils.py:42:        image_with_labels.save(path)
+utils/scene_utils.py:43:    render_base_path = os.path.join(scene.model_path, f"{stage}_render")
+utils/scene_utils.py:44:    point_cloud_path = os.path.join(render_base_path,"pointclouds")
+utils/scene_utils.py:46:    if not os.path.exists(os.path.join(scene.model_path, f"{stage}_render")):
+utils/scene_utils.py:48:    if not os.path.exists(point_cloud_path):
+utils/scene_utils.py:49:        os.makedirs(point_cloud_path)
+utils/scene_utils.py:54:        image_save_path = os.path.join(image_path,f"{iteration}_{idx}.jpg")
+utils/scene_utils.py:55:        render(gaussians,viewpoints[idx],image_save_path,scaling = 1,cam_type=dataset_type)
+utils/scene_utils.py:59:def visualize_and_save_point_cloud(point_cloud, R, T, filename):
+utils/scene_utils.py:64:    transformed_point_cloud = np.dot(R, point_cloud) + T.reshape(-1, 1)
+utils/scene_utils.py:65:    ax.scatter(transformed_point_cloud[0], transformed_point_cloud[1], transformed_point_cloud[2], c='g', marker='o')
+utils/scene_utils.py:67:    plt.savefig(filename)
+utils/point_utils.py:18:def downsample_point_cloud(points, ratio):
+utils/point_utils.py:27:def downsample_point_cloud_open3d(points, voxel_size):
+utils/point_utils.py:31:def downsample_point_cloud_cluster(points, voxel_size):
+utils/point_utils.py:37:def upsample_point_cloud(points, density_threshold, displacement_scale, iter_pass):
+utils/point_utils.py:54:def visualize_point_cloud(points, low_density_points, new_points):
+utils/point_utils.py:77:def addpoint(point_cloud,density_threshold,displacement_scale, iter_pass,):
+utils/point_utils.py:78:    points, low_density_points, new_points, low_density_index = upsample_point_cloud(point_cloud,density_threshold,displacement_scale, iter_pass)
+utils/point_utils.py:80:    return point_cloud, low_density_points, new_points, low_density_index
+utils/point_utils.py:91:    filename = "point_cloud.ply"
+utils/point_utils.py:92:    pcd = o3d.io.read_point_cloud(filename)
+utils/point_utils.py:93:    point_cloud = torch.tensor(pcd.points)
+utils/point_utils.py:101:        point_downsample = point_cloud
+utils/point_utils.py:107:            point_downsample = downsample_point_cloud_open3d(point_cloud,voxel_size=voxel_size)
+utils/point_utils.py:111:        downsampled_point_index = find_indices_in_A(point_cloud, point_downsample)
+utils/point_utils.py:112:        print("selected_num",point_cloud[downsampled_point_index].shape[0])
+utils/point_utils.py:113:        _, low_density_points, new_points, low_density_index = addpoint(point_cloud[downsampled_point_index],density_threshold=density_threshold,displacement_scale=displacement_scale,iter_pass=0)
+utils/point_utils.py:119:        global_mask = torch.zeros((point_cloud.shape[0]), dtype=torch.bool)
+utils/point_utils.py:128:        point = combine_pointcloud(point_cloud, low_density_points, new_points)
+utils/point_utils.py:129:        point_cloud = torch.tensor(point.points)
+utils/point_utils.py:130:        o3d.io.write_point_cloud(f"pointcloud/pass_{i}.ply",point)
+utils/loss_utils.py:20:def l1_loss(network_output, gt):
+utils/loss_utils.py:21:    return torch.abs((network_output - gt)).mean()
+utils/loss_utils.py:23:def l2_loss(network_output, gt):
+utils/loss_utils.py:24:    return ((network_output - gt) ** 2).mean()
+scene/neural_3D_dataset_NDC.py:34:    Outputs:
+scene/neural_3D_dataset_NDC.py:43:    # 3. Compute axis y' (no need to normalize as it's not the final output)
+scene/neural_3D_dataset_NDC.py:63:    Outputs:
+scene/neural_3D_dataset_NDC.py:113:def process_video(video_data_save, video_path, img_wh, downsample, transform):
+scene/neural_3D_dataset_NDC.py:115:    Load video_path data to video_data_save tensor.
+scene/neural_3D_dataset_NDC.py:132:                img.save(os.path.join(image_path,"%04d.png"%count))
+scene/neural_3D_dataset_NDC.py:135:                video_data_save[count] = img.permute(1,2,0)
+scene/neural_3D_dataset_NDC.py:149:                video_data_save[count] = img.permute(1,2,0)
+scene/neural_3D_dataset_NDC.py:161:    To save memory, we pre-allocate a tensor to store all the images and spawn multi-threads to load the images into this tensor.
+scene/neural_3D_dataset_NDC.py:325:                print(f"no images saved in {image_path}, extract images from video.")
+scene/neural_3D_dataset_NDC.py:337:                        img.save(os.path.join(image_path,"%04d.png"%count))
+scene/neural_3D_dataset_NDC.py:360:                # img.save(os.path.join(image_path,"%04d.png"%count))
+scene/neural_3D_dataset_NDC.py:364:                #     video_data_save[count] = img.permute(1,2,0)
+scene/hexplane.py:138:                out_dim=config["output_coordinate_dim"],
+scene/gaussian_model.py:140:        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+scene/gaussian_model.py:146:        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+scene/gaussian_model.py:150:        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+scene/gaussian_model.py:153:        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+scene/gaussian_model.py:155:        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+scene/gaussian_model.py:246:    def save_deformation(self, path):
+scene/gaussian_model.py:247:        torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
+scene/gaussian_model.py:248:        torch.save(self._deformation_table,os.path.join(path, "deformation_table.pth"))
+scene/gaussian_model.py:249:        torch.save(self._deformation_accum,os.path.join(path, "deformation_accum.pth"))
+scene/gaussian_model.py:250:    def save_ply(self, path):
+scene/gaussian_model.py:443:    def densify_and_clone(self, grads, grad_threshold, scene_extent, density_threshold=20, displacement_scale=20, model_path=None, iteration=None, stage=None):
+scene/gaussian_model.py:501:    def densify(self, max_grad, min_opacity, extent, max_screen_size, density_threshold, displacement_scale, model_path=None, iteration=None, stage=None):
+scene/gaussian_model.py:505:        self.densify_and_clone(grads, max_grad, extent, density_threshold, displacement_scale, model_path, iteration, stage)
+scene/deformation.py:171:        timenet_output = args.timenet_output
+scene/deformation.py:176:        nn.Linear(timenet_width, timenet_output))
+scene/deformation.py:177:        self.deformation_net = Deformation(W=net_width, D=defor_depth, input_ch=(3)+(3*(posbase_pe))*2, grid_pe=grid_pe, input_ch_time=timenet_output, args=args)
+scene/dataset_readers.py:48:    point_cloud: BasicPointCloud
+scene/dataset_readers.py:83:        # the exact output you're looking for:
+scene/dataset_readers.py:192:    scene_info = SceneInfo(point_cloud=pcd,
+scene/dataset_readers.py:344:    scene_info = SceneInfo(point_cloud=pcd,
+scene/dataset_readers.py:391:    scene_info = SceneInfo(point_cloud=pcd,
+scene/dataset_readers.py:474:    scene_info = SceneInfo(point_cloud=pcd,
+scene/dataset_readers.py:534:    plt.savefig("output.png")
+scene/dataset_readers.py:586:    scene_info = SceneInfo(point_cloud=pcd,
+scene/dataset_readers.py:626:    scene_info = SceneInfo(point_cloud=pcd,
+scene/__init__.py:31:        self.model_path = args.model_path
+scene/__init__.py:37:                self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
+scene/__init__.py:77:        xyz_max = scene_info.point_cloud.points.max(axis=0)
+scene/__init__.py:78:        xyz_min = scene_info.point_cloud.points.min(axis=0)
+scene/__init__.py:82:            scene_info = scene_info._replace(point_cloud=add_points(scene_info.point_cloud, xyz_max=xyz_max, xyz_min=xyz_min))
+scene/__init__.py:85:            self.gaussians.load_ply(os.path.join(self.model_path,
+scene/__init__.py:86:                                                           "point_cloud",
+scene/__init__.py:88:                                                           "point_cloud.ply"))
+scene/__init__.py:89:            self.gaussians.load_model(os.path.join(self.model_path,
+scene/__init__.py:90:                                                    "point_cloud",
+scene/__init__.py:94:            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
+scene/__init__.py:96:    def save(self, iteration, stage):
+scene/__init__.py:98:            point_cloud_path = os.path.join(self.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
+scene/__init__.py:101:            point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+scene/__init__.py:102:        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+scene/__init__.py:103:        self.gaussians.save_deformation(point_cloud_path)
+train.py:241:            # Log and save
+train.py:246:                scene.save(iteration, stage)
+train.py:273:                    gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold, 5, 5, scene.model_path, iteration, stage)
+train.py:281:                    gaussians.grow(5,5,scene.model_path,iteration,stage)
+train.py:296:                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
+train.py:297:def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
+train.py:299:    tb_writer = prepare_output_and_logger(expname)
+train.py:301:    dataset.model_path = args.model_path
+train.py:312:def prepare_output_and_logger(expname):    
+train.py:313:    if not args.model_path:
+train.py:318:        unique_str = expname
+train.py:320:        args.model_path = os.path.join("./output/", unique_str)
+train.py:321:    # Set up output folder
+train.py:322:    print("Output folder: {}".format(args.model_path))
+train.py:323:    os.makedirs(args.model_path, exist_ok = True)
+train.py:324:    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+train.py:330:        tb_writer = SummaryWriter(args.model_path)
+train.py:407:    parser.add_argument("--save_iterations", nargs="+", type=int, default=[ 14000, 20000, 30_000, 45000, 60000])
+train.py:411:    parser.add_argument("--expname", type=str, default = "")
+train.py:415:    args.save_iterations.append(args.iterations)
+train.py:421:    print("Optimizing " + args.model_path)
+train.py:429:    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
+arguments/multipleview/default.py:5:     'output_coordinate_dim': 16,
+arguments/hypernerf/default.py:5:     'output_coordinate_dim': 16,
+arguments/hypernerf/chicken.py:6:     'output_coordinate_dim': 16,
+arguments/hypernerf/broom2.py:6:     'output_coordinate_dim': 16,
+arguments/hypernerf/banana.py:6:     'output_coordinate_dim': 16,
+arguments/hypernerf/3dprinter.py:6:     'output_coordinate_dim': 16,
+arguments/dynerf/default.py:5:     'output_coordinate_dim': 16,
+arguments/dycheck/default.py:5:     'output_coordinate_dim': 16,
+arguments/dnerf/trex.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/standup.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/mutant.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/lego.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/jumpingjacks.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/hook.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/hellwarrior.py:7:     'output_coordinate_dim': 32,
+arguments/dnerf/bouncingballs.py:7:     'output_coordinate_dim': 32,
+arguments/__init__.py:51:        self._model_path = ""
+arguments/__init__.py:83:        self.timenet_output = 32 # useless
+arguments/__init__.py:91:                             'output_coordinate_dim': 32,
+arguments/__init__.py:158:        cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
+
+ succeeded in 1351ms:
+docs/DESIGN_STANDARD.md:21:- 使用ライブラリとバージョン（例: OpenCV 4.9.0, PyQt6 6.6）
+docs/BACKLOG.md:7:**Phase 0-5（D-NeRF合成シーンの「学習 → レンダリング → 評価」）は 2026-05-25 に完了**し、最小の動作確認が取れた。ここから「**4DGS全体が動く環境**」へ拡張する（2026-06-18 ロードマップ策定）。
+docs/BACKLOG.md:10:1. **実装済み4データセット系統すべて**で「学習 → レンダリング → 評価」が動く ― D-NeRF（合成・単眼〔済〕）＋ HyperNeRF（実・単眼）・DyNeRF（実・多視点）・multipleview（多視点）の**実シーン3系統**
+docs/BACKLOG.md:11:2. **複数人共用GPUサーバーで任意の1GPUを選んで動かせる**（マルチGPU運用）
+docs/BACKLOG.md:21:### Phase 0: Python環境・依存パッケージ構築
+docs/BACKLOG.md:25:| feat-001 | uv環境構築・依存インストール | uv（Python 3.10）で仮想環境を作成し、`TECH_STACK.md` の確定方針（**torch 1.13.1+cu116** を `--index-url .../whl/cu116` で導入）に従って `requirements.txt` の依存（torch系 + mmcv 1.6.0 等）をインストールする | - | **Closed**（2026-05-21完了。torch 1.13.1+cu116 / cuda 11.6 / A100認識を確認。mmcvはsetuptools<81＋`--no-build-isolation`、numpyは1.23.5固定で対処） |
+docs/BACKLOG.md:27:**判定基準（案）**: `import torch` が成功し `torch.cuda.is_available()` が `True`、かつ `torch.version.cuda` が文字列 `'11.6'` を返す。GPU（A100）が認識される。
+docs/BACKLOG.md:31:### Phase 1: CUDA拡張ビルド
+docs/BACKLOG.md:35:| feat-002 | サブモジュール初期化・CUDA拡張ビルド | `git submodule update --init --recursive` でサブモジュールを取得し、`depth-diff-gaussian-rasterization` と `simple-knn` をソースビルドする。**ビルド時は `CUDA_HOME=/usr/local/cuda-11.6` を上書き**する（グローバルの12.8のままだと、torch(cu116)とnvccのメジャー版不一致 12 vs 11 でビルドエラーまたは重大な互換性警告が生じうる） | feat-001 | **Closed**（2026-05-22完了。FR-001〜005達成。rasterizer/simple-knn を CUDA11.6・no-build-isolation で editable ビルドしimport確認。simple-knn は uv editable 向けに simple_knn/__init__.py へ import torch を追加。手動テスト合格） |
+docs/BACKLOG.md:43:### Phase 2: データセット準備（D-NeRF）
+docs/BACKLOG.md:47:| feat-003 | D-NeRFデータ準備 | D-NeRF合成シーン（bouncingballs等）をDLし `data/dnerf/` に配置。ディレクトリ構成をREADME通りに整える | feat-002 | **Closed**（2026-05-22完了。`data.zip`（246MB）をDropboxからDL→展開→`data/dnerf/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）配置。bouncingballs整合性検証合格（train=150/test=20、全画像実在、Blender判定構成OK）。`data/` は.gitignore管理外でコミットせず。手動テスト合格） |
+docs/BACKLOG.md:53:### Phase 3: 学習動作確認
+docs/BACKLOG.md:57:| feat-004 | D-NeRF学習動作確認 | `python train.py -s data/dnerf/bouncingballs --port 6017 --expname "dnerf/bouncingballs" --configs arguments/dnerf/bouncingballs.py` で学習が完走する。出力先は `--expname` から `./output/{expname}` と決まるため **`--expname` 指定が必須**（未指定だと `./output/` 直下に出力される） | feat-003 | **Closed**（2026-05-22完了。coarse3000+fine20000=計23000反復を約10分（A100×1）で完走。`output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物（point_cloud.ply 6.9MB＋deformation*.pth）生成。ITER14000 test PSNR=39.84、最終点数27,769。実装中に発覚した Pillow 12.2.0 非互換を bug修正（`scene/dataset_readers.py:287` `np.byte`→`np.uint8`、investigation.md記録）。手動テスト合格） |
+docs/BACKLOG.md:65:### Phase 4: レンダリング動作確認
+docs/BACKLOG.md:69:| feat-005 | レンダリング動作確認 | `python render.py --model_path "output/dnerf/bouncingballs/" --skip_train --configs arguments/dnerf/bouncingballs.py` でレンダリング画像・動画が生成される | feat-004 | **Closed**（2026-05-25完了。約13秒（A100×1）で test 20枚＋video 160枚を完走、exit code 0。`test/ours_20000/{renders,gt}`各20枚・`video/ours_20000/renders`160枚・両セットの`video_rgb.mp4`（非空）を生成。iteration_20000を自動選択、`point nums: 27769`（feat-004最終と一致）。コード変更ゼロ・不具合なし（Pillow問題は再発せず）。目視確認①〜④合格。手動テスト合格） |
+docs/BACKLOG.md:77:### Phase 5: 評価動作確認
+docs/BACKLOG.md:81:| feat-006 | 評価動作確認 | `python metrics.py --model_paths output/dnerf/bouncingballs/`（正式な引数名は `--model_paths`/`-m`、必須・複数指定可。公式READMEは単数 `--model_path` と記載するが、argparseの前置一致で単数形も受理される）でPSNR/SSIM/LPIPS/MS-SSIM/D-SSIMが算出される | feat-005 | **Closed**（2026-05-25完了。約62秒（A100×1）で test 20枚を評価完走、exit code 0。6指標算出: PSNR=40.68・SSIM=0.9943・LPIPS-vgg=0.0155・LPIPS-alex=0.0059・MS-SSIM=0.9954・D-SSIM=0.0023（論文 bouncingballs 値 PSNR 40.62/SSIM 0.9942/LPIPS 0.0155 とほぼ一致、特に LPIPS-vgg は論文と同値）。`output/dnerf/bouncingballs/{results,per_view}.json` 生成。LPIPS重み4ファイルは調査段階でDL済み・本番はキャッシュから読込（再DLなし）。コード変更ゼロ・不具合なし。手動テスト合格。**これをもってD-NeRF動作確認（学習→レンダリング→評価）の環境構築が完了**） |
+docs/BACKLOG.md:88:- **この時点で「D-NeRFが正常動作する環境」の構築完了（2026-05-25 達成）。Phase 0-5 はこれで全て Closed。**
+docs/BACKLOG.md:92:> **ここから「4DGS全体が動く環境」への拡張フェーズ（2026-06-18 ロードマップ策定）。** ゴール・スコープは本ファイル冒頭を参照。優先順は「Phase 6（マルチGPU運用）→ Phase 7（COLMAP）→ Phase 8〜10（実シーン3系統）」。各 feat-XXX は着手時に `docs/issues/feat-{number}-{slug}/` を作成する。
+docs/BACKLOG.md:94:### Phase 6: マルチGPU運用対応（任意GPU選択）
+docs/BACKLOG.md:98:| feat-007 | マルチGPU運用対応 | 複数人共用GPUサーバーで、GPU0以外の空いている任意の1GPUを選んで学習・レンダリング・評価を動かせるようにする。**実機検証で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理GPU N に乗ることを確認済み（2026-06-18、コード修正不要）**。本案件は train/render/metrics の全経路がD-NeRFで GPU≠0 完走することの確認と、運用ルールの文書化が主眼 | feat-006 | **In Progress**（2026-06-18 着手。`docs/issues/feat-007-multi-gpu/` に requirements.md / design.md を作成、Codexレビューへ） |
+docs/BACKLOG.md:100:**判定基準（案）**: `CUDA_VISIBLE_DEVICES=<0以外の空きGPU>` を付けて train.py / render.py / metrics.py をD-NeRFで実行し、(1) 指定した物理GPUにのみ負荷が乗る（nvidia-smiで確認）、(2) 3経路ともクラッシュせず完走する、(3) 運用手順がCLAUDE.md等に明文化される。
+docs/BACKLOG.md:101:- **背景（調査済み）**: `utils/general_utils.py:139` と `metrics.py:116-117` に `set_device(torch.device("cuda:0"))` のハードコードがあるが、`cuda:0` はCUDA_VISIBLE_DEVICESでマスクされた後の論理デバイス先頭を指すため物理GPU0固定にはならない。**2026-06-18 実機検証済み**: `CUDA_VISIBLE_DEVICES=5` 指定下で当該コードを再現し、プロセスが物理GPU5に乗ることを確認。よってコード変更は原則不要（分散学習機構=DataParallel/DDP等は本体に存在しない）
+docs/BACKLOG.md:103:### Phase 7: COLMAP環境構築（実シーンの前提）
+docs/BACKLOG.md:107:| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Open** |
+docs/BACKLOG.md:111:### Phase 8: HyperNeRF動作確認（実シーン・単眼）
+docs/BACKLOG.md:115:| feat-009 | HyperNeRF動作確認 | 実シーン・単眼の1シーン（例: broom2）で、前処理（`colmap.sh ... hypernerf`＋`downsample_point.py`、または事前生成COLMAP点群のDL）→学習→レンダリング→評価を一通り動かす | feat-008 | **Open** |
+docs/BACKLOG.md:119:### Phase 9: DyNeRF動作確認（実シーン・多視点）
+docs/BACKLOG.md:123:| feat-010 | DyNeRF動作確認 | 実シーン・多視点の1シーン（例: cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`）→ダウンサンプリング→学習→レンダリング→評価を動かす | feat-008 | **Open** |
+docs/BACKLOG.md:127:### Phase 10: multipleview動作確認（多視点・カスタム）
+docs/BACKLOG.md:131:| feat-011 | multipleview動作確認 | 多視点カスタムデータで `multipleviewprogress.sh`（フレーム抽出→COLMAP→LLFFポーズ→ダウンサンプリング）→config作成→学習を動かす | feat-008 | **Open** |
+docs/BACKLOG.md:133:**判定基準（案）**: `multipleviewprogress.sh` が完走し `sparse_/`・`points3D_multipleview.ply`・`poses_bounds_multipleview.npy` が生成される。`arguments/multipleview/{name}.py` 作成の上 `train.py` が完走する。LLFF（scikit-image）依存に注意（`scene/dataset_readers.py:readMultipleViewinfos`、判定は points3D_multipleview.ply の存在）
+docs/BACKLOG.md:145:| マルチGPU**分散**学習（複数GPU同時使用） | Phase 6（feat-007）の「任意の1GPU選択」とは別物。本体に分散機構（DataParallel/DDP等）の実装がなく、単一GPU運用で足りるため対象外 |
+docs/BACKLOG.md:152:- **Open**: 未着手
+docs/BACKLOG.md:154:- **Closed**: 完了（手動テストで判定基準を満たし、ユーザー承認済み）
+docs/BACKLOG.md:7:**Phase 0-5（D-NeRF合成シーンの「学習 → レンダリング → 評価」）は 2026-05-25 に完了**し、最小の動作確認が取れた。ここから「**4DGS全体が動く環境**」へ拡張する（2026-06-18 ロードマップ策定）。
+docs/BACKLOG.md:10:1. **実装済み4データセット系統すべて**で「学習 → レンダリング → 評価」が動く ― D-NeRF（合成・単眼〔済〕）＋ HyperNeRF（実・単眼）・DyNeRF（実・多視点）・multipleview（多視点）の**実シーン3系統**
+docs/BACKLOG.md:11:2. **複数人共用GPUサーバーで任意の1GPUを選んで動かせる**（マルチGPU運用）
+docs/BACKLOG.md:21:### Phase 0: Python環境・依存パッケージ構築
+docs/BACKLOG.md:25:| feat-001 | uv環境構築・依存インストール | uv（Python 3.10）で仮想環境を作成し、`TECH_STACK.md` の確定方針（**torch 1.13.1+cu116** を `--index-url .../whl/cu116` で導入）に従って `requirements.txt` の依存（torch系 + mmcv 1.6.0 等）をインストールする | - | **Closed**（2026-05-21完了。torch 1.13.1+cu116 / cuda 11.6 / A100認識を確認。mmcvはsetuptools<81＋`--no-build-isolation`、numpyは1.23.5固定で対処） |
+docs/BACKLOG.md:27:**判定基準（案）**: `import torch` が成功し `torch.cuda.is_available()` が `True`、かつ `torch.version.cuda` が文字列 `'11.6'` を返す。GPU（A100）が認識される。
+docs/BACKLOG.md:31:### Phase 1: CUDA拡張ビルド
+docs/BACKLOG.md:35:| feat-002 | サブモジュール初期化・CUDA拡張ビルド | `git submodule update --init --recursive` でサブモジュールを取得し、`depth-diff-gaussian-rasterization` と `simple-knn` をソースビルドする。**ビルド時は `CUDA_HOME=/usr/local/cuda-11.6` を上書き**する（グローバルの12.8のままだと、torch(cu116)とnvccのメジャー版不一致 12 vs 11 でビルドエラーまたは重大な互換性警告が生じうる） | feat-001 | **Closed**（2026-05-22完了。FR-001〜005達成。rasterizer/simple-knn を CUDA11.6・no-build-isolation で editable ビルドしimport確認。simple-knn は uv editable 向けに simple_knn/__init__.py へ import torch を追加。手動テスト合格） |
+docs/BACKLOG.md:43:### Phase 2: データセット準備（D-NeRF）
+docs/BACKLOG.md:47:| feat-003 | D-NeRFデータ準備 | D-NeRF合成シーン（bouncingballs等）をDLし `data/dnerf/` に配置。ディレクトリ構成をREADME通りに整える | feat-002 | **Closed**（2026-05-22完了。`data.zip`（246MB）をDropboxからDL→展開→`data/dnerf/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）配置。bouncingballs整合性検証合格（train=150/test=20、全画像実在、Blender判定構成OK）。`data/` は.gitignore管理外でコミットせず。手動テスト合格） |
+docs/BACKLOG.md:53:### Phase 3: 学習動作確認
+docs/BACKLOG.md:57:| feat-004 | D-NeRF学習動作確認 | `python train.py -s data/dnerf/bouncingballs --port 6017 --expname "dnerf/bouncingballs" --configs arguments/dnerf/bouncingballs.py` で学習が完走する。出力先は `--expname` から `./output/{expname}` と決まるため **`--expname` 指定が必須**（未指定だと `./output/` 直下に出力される） | feat-003 | **Closed**（2026-05-22完了。coarse3000+fine20000=計23000反復を約10分（A100×1）で完走。`output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物（point_cloud.ply 6.9MB＋deformation*.pth）生成。ITER14000 test PSNR=39.84、最終点数27,769。実装中に発覚した Pillow 12.2.0 非互換を bug修正（`scene/dataset_readers.py:287` `np.byte`→`np.uint8`、investigation.md記録）。手動テスト合格） |
+docs/BACKLOG.md:65:### Phase 4: レンダリング動作確認
+docs/BACKLOG.md:69:| feat-005 | レンダリング動作確認 | `python render.py --model_path "output/dnerf/bouncingballs/" --skip_train --configs arguments/dnerf/bouncingballs.py` でレンダリング画像・動画が生成される | feat-004 | **Closed**（2026-05-25完了。約13秒（A100×1）で test 20枚＋video 160枚を完走、exit code 0。`test/ours_20000/{renders,gt}`各20枚・`video/ours_20000/renders`160枚・両セットの`video_rgb.mp4`（非空）を生成。iteration_20000を自動選択、`point nums: 27769`（feat-004最終と一致）。コード変更ゼロ・不具合なし（Pillow問題は再発せず）。目視確認①〜④合格。手動テスト合格） |
+docs/BACKLOG.md:77:### Phase 5: 評価動作確認
+docs/BACKLOG.md:81:| feat-006 | 評価動作確認 | `python metrics.py --model_paths output/dnerf/bouncingballs/`（正式な引数名は `--model_paths`/`-m`、必須・複数指定可。公式READMEは単数 `--model_path` と記載するが、argparseの前置一致で単数形も受理される）でPSNR/SSIM/LPIPS/MS-SSIM/D-SSIMが算出される | feat-005 | **Closed**（2026-05-25完了。約62秒（A100×1）で test 20枚を評価完走、exit code 0。6指標算出: PSNR=40.68・SSIM=0.9943・LPIPS-vgg=0.0155・LPIPS-alex=0.0059・MS-SSIM=0.9954・D-SSIM=0.0023（論文 bouncingballs 値 PSNR 40.62/SSIM 0.9942/LPIPS 0.0155 とほぼ一致、特に LPIPS-vgg は論文と同値）。`output/dnerf/bouncingballs/{results,per_view}.json` 生成。LPIPS重み4ファイルは調査段階でDL済み・本番はキャッシュから読込（再DLなし）。コード変更ゼロ・不具合なし。手動テスト合格。**これをもってD-NeRF動作確認（学習→レンダリング→評価）の環境構築が完了**） |
+docs/BACKLOG.md:88:- **この時点で「D-NeRFが正常動作する環境」の構築完了（2026-05-25 達成）。Phase 0-5 はこれで全て Closed。**
+docs/BACKLOG.md:92:> **ここから「4DGS全体が動く環境」への拡張フェーズ（2026-06-18 ロードマップ策定）。** ゴール・スコープは本ファイル冒頭を参照。優先順は「Phase 6（マルチGPU運用）→ Phase 7（COLMAP）→ Phase 8〜10（実シーン3系統）」。各 feat-XXX は着手時に `docs/issues/feat-{number}-{slug}/` を作成する。
+docs/BACKLOG.md:94:### Phase 6: マルチGPU運用対応（任意GPU選択）
+docs/BACKLOG.md:98:| feat-007 | マルチGPU運用対応 | 複数人共用GPUサーバーで、GPU0以外の空いている任意の1GPUを選んで学習・レンダリング・評価を動かせるようにする。**実機検証で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理GPU N に乗ることを確認済み（2026-06-18、コード修正不要）**。本案件は train/render/metrics の全経路がD-NeRFで GPU≠0 完走することの確認と、運用ルールの文書化が主眼 | feat-006 | **In Progress**（2026-06-18 着手。`docs/issues/feat-007-multi-gpu/` に requirements.md / design.md を作成、Codexレビューへ） |
+docs/BACKLOG.md:100:**判定基準（案）**: `CUDA_VISIBLE_DEVICES=<0以外の空きGPU>` を付けて train.py / render.py / metrics.py をD-NeRFで実行し、(1) 指定した物理GPUにのみ負荷が乗る（nvidia-smiで確認）、(2) 3経路ともクラッシュせず完走する、(3) 運用手順がCLAUDE.md等に明文化される。
+docs/BACKLOG.md:101:- **背景（調査済み）**: `utils/general_utils.py:139` と `metrics.py:116-117` に `set_device(torch.device("cuda:0"))` のハードコードがあるが、`cuda:0` はCUDA_VISIBLE_DEVICESでマスクされた後の論理デバイス先頭を指すため物理GPU0固定にはならない。**2026-06-18 実機検証済み**: `CUDA_VISIBLE_DEVICES=5` 指定下で当該コードを再現し、プロセスが物理GPU5に乗ることを確認。よってコード変更は原則不要（分散学習機構=DataParallel/DDP等は本体に存在しない）
+docs/BACKLOG.md:103:### Phase 7: COLMAP環境構築（実シーンの前提）
+docs/BACKLOG.md:107:| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Open** |
+docs/BACKLOG.md:111:### Phase 8: HyperNeRF動作確認（実シーン・単眼）
+docs/BACKLOG.md:115:| feat-009 | HyperNeRF動作確認 | 実シーン・単眼の1シーン（例: broom2）で、前処理（`colmap.sh ... hypernerf`＋`downsample_point.py`、または事前生成COLMAP点群のDL）→学習→レンダリング→評価を一通り動かす | feat-008 | **Open** |
+docs/BACKLOG.md:119:### Phase 9: DyNeRF動作確認（実シーン・多視点）
+docs/BACKLOG.md:123:| feat-010 | DyNeRF動作確認 | 実シーン・多視点の1シーン（例: cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`）→ダウンサンプリング→学習→レンダリング→評価を動かす | feat-008 | **Open** |
+docs/BACKLOG.md:127:### Phase 10: multipleview動作確認（多視点・カスタム）
+docs/BACKLOG.md:131:| feat-011 | multipleview動作確認 | 多視点カスタムデータで `multipleviewprogress.sh`（フレーム抽出→COLMAP→LLFFポーズ→ダウンサンプリング）→config作成→学習を動かす | feat-008 | **Open** |
+docs/BACKLOG.md:133:**判定基準（案）**: `multipleviewprogress.sh` が完走し `sparse_/`・`points3D_multipleview.ply`・`poses_bounds_multipleview.npy` が生成される。`arguments/multipleview/{name}.py` 作成の上 `train.py` が完走する。LLFF（scikit-image）依存に注意（`scene/dataset_readers.py:readMultipleViewinfos`、判定は points3D_multipleview.ply の存在）
+docs/BACKLOG.md:145:| マルチGPU**分散**学習（複数GPU同時使用） | Phase 6（feat-007）の「任意の1GPU選択」とは別物。本体に分散機構（DataParallel/DDP等）の実装がなく、単一GPU運用で足りるため対象外 |
+docs/BACKLOG.md:152:- **Open**: 未着手
+docs/BACKLOG.md:154:- **Closed**: 完了（手動テストで判定基準を満たし、ユーザー承認済み）
+docs/REQUIREMENTS_STANDARD.md:32:- 対応環境（OS、GPUの要否）
+docs/issues/feat-007-multi-gpu/design.md:1:# feat-007 機能設計書: マルチGPU運用対応（任意GPU選択）
+docs/issues/feat-007-multi-gpu/design.md:7:| FR-001 | 任意 GPU（N≠0）での学習完走 | §1.4.1 / §1.4.2 |
+docs/issues/feat-007-multi-gpu/design.md:8:| FR-002 | 任意 GPU（N≠0）でのレンダリング完走 | §1.4.1 / §1.4.2 |
+docs/issues/feat-007-multi-gpu/design.md:9:| FR-003 | 任意 GPU（N≠0）での評価完走 | §1.4.1 / §1.4.2 |
+docs/issues/feat-007-multi-gpu/design.md:10:| FR-004 | 指定物理 GPU への負荷限定の確認 | §1.4.3 |
+docs/issues/feat-007-multi-gpu/design.md:11:| FR-005 | マルチGPU運用ルールの文書化 | §1.4.5 |
+docs/issues/feat-007-multi-gpu/design.md:15:本案件は**コードを変更しない**。設計の中心は「`cuda:0` / `cuda` のハードコードがあるにもかかわらず `CUDA_VISIBLE_DEVICES=N` で物理 GPU N に乗る」というデバイス選択メカニズムを明示し、3 経路を GPU≠0 で完走させる手順と、負荷が指定 GPU に限定されることの確認方法、そして運用ルールの文面を確定することにある。
+docs/issues/feat-007-multi-gpu/design.md:19:### GPU 選択メカニズム（本案件の核心）
+docs/issues/feat-007-multi-gpu/design.md:25:物理 GPU N だけがプロセスから可視になる
+docs/issues/feat-007-multi-gpu/design.md:26:   │  物理 GPU N → 論理デバイス cuda:0（先頭に再番号付け）
+docs/issues/feat-007-multi-gpu/design.md:28:本体コードの "cuda:0" / "cuda"（論理先頭）= 物理 GPU N を指す
+docs/issues/feat-007-multi-gpu/design.md:35:要点: `cuda:0` は「**マスク後の論理デバイス先頭**」であり「物理 GPU0」ではない。`CUDA_VISIBLE_DEVICES=N` を与えた瞬間、論理 `cuda:0` の実体は物理 GPU N になる。したがってコードを変えずに物理 GPU を選べる（実機検証 2026-06-18 で N=5 を確認済み）。
+docs/issues/feat-007-multi-gpu/design.md:37:### GPU 固定箇所（コード全文 grep 結果。これ以外に固定なし）
+docs/issues/feat-007-multi-gpu/design.md:58:/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log   # ログ（リポジトリ外）
+docs/issues/feat-007-multi-gpu/design.md:64:- GPU 選択: 環境変数 `CUDA_VISIBLE_DEVICES`（コード変更なし。ADR-1）
+docs/issues/feat-007-multi-gpu/design.md:71:### 1.4.1 FR-001〜003: 空き GPU の選定と 3 経路の実行手順
+docs/issues/feat-007-multi-gpu/design.md:73:**手順 0: 空き GPU の選定（N の決定）**
+docs/issues/feat-007-multi-gpu/design.md:79:- `memory.used` が十分小さく（目安 < 1000 MiB）`utilization.gpu` が 0% に近い GPU を「空き」とみなす。
+docs/issues/feat-007-multi-gpu/design.md:80:- **N は 0 以外**から 1 枚選ぶ（本案件は「GPU≠0 で動く」ことの実証が目的）。複数空きがあれば最小の N（例: 1）を選ぶ。
+docs/issues/feat-007-multi-gpu/design.md:81:- 選んだ N を 3 経路すべてで共通に使う（学習成果物を同じ GPU 系で生成・評価する必要はないが、検証の一貫性のため同一 N とする）。
+docs/issues/feat-007-multi-gpu/design.md:86:mkdir -p /data/sakagawa/tmp/feat007-multi-gpu
+docs/issues/feat-007-multi-gpu/design.md:93:  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:99:  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:104:  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:121:### 1.4.3 FR-004: 指定物理 GPU への負荷限定の確認
+docs/issues/feat-007-multi-gpu/design.md:126:nvidia-smi                       # Processes 欄で PID と GPU 番号の対応を見る
+docs/issues/feat-007-multi-gpu/design.md:127:# 補助: 当該プロセスの GPU 占有のみ抽出
+docs/issues/feat-007-multi-gpu/design.md:133:2. `nvidia-smi` の Processes 欄で、その PID が **GPU N の行にのみ**現れる。
+docs/issues/feat-007-multi-gpu/design.md:134:3. GPU0 を含む他 GPU の行に当該 PID が**現れない**。
+docs/issues/feat-007-multi-gpu/design.md:135:4. GPU N の `Memory-Usage` と `GPU-Util` が学習負荷で上昇している。
+docs/issues/feat-007-multi-gpu/design.md:137:**判定**: 上記 2〜3 を満たせば「`cuda:0` ハードコードでも物理 GPU0 に漏れず、指定した物理 GPU N にのみ負荷が乗る」ことが実証される（FR-004 合格）。
+docs/issues/feat-007-multi-gpu/design.md:138:**注意**: `nvidia-smi` 全体の index は物理番号。`CUDA_VISIBLE_DEVICES=N` 下のプロセス内では論理 `cuda:0` だが、`nvidia-smi` の Processes 欄は**物理 GPU N**に紐づけて表示する（ここが確認ポイント）。
+docs/issues/feat-007-multi-gpu/design.md:144:| E1 | 指定 GPU N が他者使用中で VRAM 不足（OOM） | 学習/レンダリングが `CUDA out of memory` で異常終了 | 実行前 `nvidia-smi`（§1.4.1 手順 0）で空きを確認して回避。発生時は別の空き N で再実行（自動リトライはしない）。`investigation.md` に記録 |
+docs/issues/feat-007-multi-gpu/design.md:145:| E2 | 存在しない GPU 番号 N を指定（例 N=7） | 起動時 `CUDA error: invalid device ordinal` | N は 0〜6 の範囲で指定。誤指定時はコマンド修正のうえ再実行 |
+docs/issues/feat-007-multi-gpu/design.md:146:| E3 | `CUDA_VISIBLE_DEVICES` を付け忘れる | 既定で論理 `cuda:0`＝物理 GPU0 を使い、GPU0 が混雑なら OOM | 運用ルール（§1.4.5）で必須化。3 経路すべてに付ける |
+docs/issues/feat-007-multi-gpu/design.md:149:| E6 | Pillow/numpy 型互換（feat-004 の前例）の再発 | 学習/評価で `TypeError` | feat-004 で `dataset_readers.py:287` を `np.uint8` 修正済み（既適用）。GPU 変更と無関係。再発時はコード変更せず中断・記録 |
+docs/issues/feat-007-multi-gpu/design.md:153:### 1.4.5 FR-005: マルチGPU運用ルールの文書化（CLAUDE.md 追記文面案）
+docs/issues/feat-007-multi-gpu/design.md:155:`CLAUDE.md` に新節「## マルチGPU運用ルール」を追加する。文面案（実装ステップで CLAUDE.md に反映）:
+docs/issues/feat-007-multi-gpu/design.md:157:> ### マルチGPU運用ルール（任意GPU選択）
+docs/issues/feat-007-multi-gpu/design.md:159:> 本マシンは A100 × 7 を複数人で共用する。学習・レンダリング・評価は**1 プロセス = 1 GPU**で動かし、空いている任意の GPU を選んで使う。
+docs/issues/feat-007-multi-gpu/design.md:161:> 1. **実行前に `nvidia-smi` で空き GPU を確認**し、`memory.used` が小さく `utilization.gpu` が低い GPU 番号 N を 1 枚選ぶ。
+docs/issues/feat-007-multi-gpu/design.md:164:> 3. コード内の `cuda:0` / `cuda`（`utils/general_utils.py:139`、`metrics.py:116-117`、`render.py`）は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU N に乗る。**コード変更は不要**（物理 GPU0 固定ではない）。
+docs/issues/feat-007-multi-gpu/design.md:165:> 4. **分散学習（複数 GPU 同時使用）は本体非対応**。1 ジョブで複数 GPU は使えない。
+docs/issues/feat-007-multi-gpu/design.md:175:[空きGPU確認 nvidia-smi] → N 決定（N≠0）
+docs/issues/feat-007-multi-gpu/design.md:180:   → CLAUDE.md にマルチGPU運用ルール節を追記
+docs/issues/feat-007-multi-gpu/design.md:193:**生成物**: `output/dnerf/bouncingballs_feat007/`（学習・レンダリング・評価成果物。`.gitignore` 管理外・非コミット）。ログは `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`。
+docs/issues/feat-007-multi-gpu/design.md:195:**文書更新**: `CLAUDE.md`（マルチGPU運用ルール節を追記）、`docs/BACKLOG.md`（feat-007 を Closed に）。
+docs/issues/feat-007-multi-gpu/design.md:201:- 環境変数: `CUDA_VISIBLE_DEVICES=N`（N=物理 GPU 番号、本案件は N≠0）
+docs/issues/feat-007-multi-gpu/design.md:209:- ログ保存先: `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`（リポジトリ外、隔離）
+docs/issues/feat-007-multi-gpu/design.md:214:  - GPU 確認: `nvidia-smi` 出力で当該 PID が GPU N にのみ紐づく（FR-004）
+docs/issues/feat-007-multi-gpu/design.md:223:### ADR-1: コードは変更せず `CUDA_VISIBLE_DEVICES` で物理 GPU を選ぶ
+docs/issues/feat-007-multi-gpu/design.md:224:**採用**: `cuda:0` / `cuda` は `CUDA_VISIBLE_DEVICES` でマスクした後の論理先頭を指すため、環境変数だけで物理 GPU を選べる（実機検証 2026-06-18・N=5 で確認）。
+docs/issues/feat-007-multi-gpu/design.md:229:**却下案**: 既存 `output/dnerf/bouncingballs/` を再利用（学習をスキップし render/metrics のみ GPU≠0 で確認）→ FR-001（学習の GPU≠0 完走）が検証できない。3 経路すべてを GPU≠0 で通すため新規学習する。
+docs/issues/feat-007-multi-gpu/design.md:239:論文値・feat-006 実測（PSNR≈40.68）が既知で、GPU 変更による異常を指標で検知しやすい。データも取得済みで追加コスト無し。
+docs/issues/feat-007-multi-gpu/design.md:247:- U2: 学習稼働中の `nvidia-smi` で当該 PID が物理 GPU N にのみ現れ、GPU0 を含む他 GPU に現れないか（FR-004 の核心）
+docs/issues/feat-007-multi-gpu/design.md:249:- U4: 評価指標が feat-006 実測（PSNR≈40.68 / SSIM≈0.994 等）と整合するか（GPU 変更で数値が変わらないこと）
+docs/issues/feat-007-multi-gpu/requirements.md:1:# feat-007 要求仕様書: マルチGPU運用対応（任意GPU選択）
+docs/issues/feat-007-multi-gpu/requirements.md:5:**何を作るのか**: 複数人で共用する GPU サーバー（A100-SXM4-40GB × 7）上で、4DGaussians の「学習 → レンダリング → 評価」の 3 経路を、**GPU0 以外の空いている任意の 1 枚の GPU を選んで**動かせる運用を確立する。具体的には (1) D-NeRF `bouncingballs` を GPU≠0 で 3 経路完走させて確認し、(2) 指定 GPU にのみ負荷が乗ることを `nvidia-smi` で確認し、(3) GPU 選択・並行実行時のポート衝突回避・分散学習非対応を運用ルールとして文書化する。
+docs/issues/feat-007-multi-gpu/requirements.md:7:**なぜ作るのか**: 本マシンは複数人が共用しており、GPU0 が他者に使われている／空いていないことが常態である。Phase 0-5（D-NeRF 動作確認）は GPU0（`CUDA_VISIBLE_DEVICES=0`）固定で実施したが、共用環境では**空いている任意の GPU を選んで実行できる**必要がある。また Phase 7 以降の実シーン 3 系統（HyperNeRF/DyNeRF/multipleview）も同じ運用で動かすため、ここで運用方式を確定・文書化しておく。
+docs/issues/feat-007-multi-gpu/requirements.md:14:- GPU 固定箇所は `utils/general_utils.py:139`（`safe_state` 内、train/render が呼ぶ）と `metrics.py:116-117`（`__main__`）の 2 か所のみ。いずれも `torch.device("cuda:0")` を `set_device` する。render.py は加えて `device="cuda"` / `.cuda()` を使う。これら `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU0 固定ではない。
+docs/issues/feat-007-multi-gpu/requirements.md:16:- 公式スクリプト群（`scripts/*.sh`）は既に `export CUDA_VISIBLE_DEVICES=N&&python ...` で GPU 0〜3 を使い分けており、本案件の運用方式は公式の想定と一致する。
+docs/issues/feat-007-multi-gpu/requirements.md:17:- 2026-06-18 の実機検証で `CUDA_VISIBLE_DEVICES=5` 指定下にプロセスが物理 GPU5 に乗ることを確認済み。
+docs/issues/feat-007-multi-gpu/requirements.md:21:- **物理 GPU 番号**: `nvidia-smi` が表示する GPU の通し番号（本マシンは 0〜6）。`CUDA_VISIBLE_DEVICES=N` の N に与える値。
+docs/issues/feat-007-multi-gpu/requirements.md:22:- **論理デバイス**: PyTorch が見る GPU。`CUDA_VISIBLE_DEVICES=N` を設定すると、物理 GPU N が論理デバイス `cuda:0`（先頭）として見える。本体コードの `cuda:0` / `cuda` はこの論理先頭を指す。
+docs/issues/feat-007-multi-gpu/requirements.md:24:- **任意 GPU 選択（マルチGPU運用）**: 複数 GPU の中から空いている 1 枚を実行ごとに選んで使う運用。**1 プロセス = 1 GPU**。複数 GPU を 1 ジョブで同時使用する分散学習とは異なる（本案件のスコープ外）。
+docs/issues/feat-007-multi-gpu/requirements.md:25:- **負荷限定**: あるプロセスが、指定した物理 GPU N にのみ GPU メモリ・利用率を消費し、他 GPU には消費しない状態。
+docs/issues/feat-007-multi-gpu/requirements.md:31:### FR-001: 任意 GPU（N≠0）での学習完走
+docs/issues/feat-007-multi-gpu/requirements.md:33:- `CUDA_VISIBLE_DEVICES=N`（N は 0 以外の空き物理 GPU）を付けて `train.py` を D-NeRF `bouncingballs` で実行し、クラッシュせず完走する。
+docs/issues/feat-007-multi-gpu/requirements.md:38:- 受け入れ基準: プロセスが終了コード 0 で終了し、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` が生成される（feat-004 の判定基準に準ずる）。`CUDA error: invalid device ordinal` 等の GPU 起因エラーが出ないこと。
+docs/issues/feat-007-multi-gpu/requirements.md:40:### FR-002: 任意 GPU（N≠0）でのレンダリング完走
+docs/issues/feat-007-multi-gpu/requirements.md:48:### FR-003: 任意 GPU（N≠0）での評価完走
+docs/issues/feat-007-multi-gpu/requirements.md:56:### FR-004: 指定物理 GPU への負荷限定の確認
+docs/issues/feat-007-multi-gpu/requirements.md:58:- FR-001 の学習が GPU N で稼働中に `nvidia-smi` を実行し、当該 Python プロセスが**物理 GPU N にのみ**現れ、GPU0 を含む他 GPU には現れないことを確認する。
+docs/issues/feat-007-multi-gpu/requirements.md:60:- 出力: GPU N の行に当該 PID と GPU メモリ消費が表示され、他 GPU 行に当該 PID が無いことの記録（ログ／スクリーンショット相当のテキスト）
+docs/issues/feat-007-multi-gpu/requirements.md:62:- 受け入れ基準: `nvidia-smi` の Processes 欄で当該 PID が GPU N にのみ紐づく。他 GPU（特に GPU0）に当該 PID が無い。これにより「`cuda:0` ハードコードでも物理 GPU0 に漏れない」ことを実証する。
+docs/issues/feat-007-multi-gpu/requirements.md:64:### FR-005: マルチGPU運用ルールの文書化
+docs/issues/feat-007-multi-gpu/requirements.md:66:- 共用サーバーでの任意 GPU 運用手順を `CLAUDE.md` の新節「マルチGPU運用ルール」と本案件 `design.md` に明文化する。
+docs/issues/feat-007-multi-gpu/requirements.md:68:  1. 実行前に `nvidia-smi` で空き GPU を確認し N（≠0、空き 1 枚）を選ぶ
+docs/issues/feat-007-multi-gpu/requirements.md:70:  3. `cuda:0` / `cuda` は論理デバイス先頭＝マスク後の物理 GPU N を指すため**コード変更は不要**
+docs/issues/feat-007-multi-gpu/requirements.md:71:  4. 分散学習（複数 GPU 同時使用）は本体非対応＝**1 プロセス 1 GPU**
+docs/issues/feat-007-multi-gpu/requirements.md:85:- **処理時間**: 動作確認が目的で時間は基準にしない。参考: 学習 約 10 分（feat-004 実績）、レンダリング 約 13 秒（feat-005）、評価 約 62 秒（feat-006）。GPU が変わっても同等を見込む。
+docs/issues/feat-007-multi-gpu/requirements.md:86:- **VRAM**: 単一ジョブが 40GB に収まること（feat-004〜006 で実証済み。GPU 変更で消費量は変わらない）。
+docs/issues/feat-007-multi-gpu/requirements.md:87:- **信頼性**: 指定 GPU が他者使用中で OOM／占有の場合は**異常終了とみなし自動リトライしない**。実行前 `nvidia-smi` で空きを確認して回避する。原因は `investigation.md` に記録。
+docs/issues/feat-007-multi-gpu/requirements.md:88:- **再現性**: GPU 番号 N・ポート・出力先・ログ保存先を design に明記し、`/clear` 後でも同一手順で再実行できること。N は実行時の空き状況で選ぶため可変だが、選び方を手順化する。
+docs/issues/feat-007-multi-gpu/requirements.md:89:- **隔離性**: ログ等の一時生成物はリポジトリ外（`/data/sakagawa/tmp/feat007-multi-gpu/`）に置く。成果物は `output/dnerf/bouncingballs_feat007/`（`.gitignore` 管理外・非コミット）。
+docs/issues/feat-007-multi-gpu/requirements.md:98:- **分散学習（複数 GPU 同時使用）は対象外**（本体非対応、BACKLOG スコープ外）。本案件は「任意の 1 GPU 選択」に限定する。
+docs/issues/feat-007-multi-gpu/requirements.md:99:- GPU 選択は `CUDA_VISIBLE_DEVICES` で行う（コード内 `set_device` の引数化はしない＝本体改変回避）。
+docs/issues/feat-007-multi-gpu/requirements.md:103:1. FR-001・FR-002・FR-003（3 経路の GPU≠0 完走）= Must（MVP の中核）
+docs/issues/feat-007-multi-gpu/requirements.md:104:2. FR-004（負荷限定の確認）= Must（「物理 GPU0 に漏れない」ことの実証が本案件の肝）
+docs/issues/feat-007-multi-gpu/requirements.md:105:3. FR-005（運用ルールの文書化）= Must（後続 Phase の前提）
+docs/issues/feat-007-multi-gpu/requirements.md:108:MVP の範囲: FR-001〜004（GPU≠0 で 3 経路が完走し、指定 GPU にのみ負荷が乗ることを確認）。FR-005 はそれを運用知識として定着させる文書化、FR-006 は全 FR に課す制約。Should 相当の品質目安は FR-003 の指標健全性（桁違いの乖離がないこと）のみ。
+docs/issues/feat-007-multi-gpu/README.md:1:# feat-007: マルチGPU運用対応（任意GPU選択）
+docs/issues/feat-007-multi-gpu/README.md:5:4DGaussians 全体動作環境への拡張 **Phase 6**。複数人共用 GPU サーバー（A100-SXM4-40GB × 7）で、**GPU0 以外の空いている任意の 1 枚**を選んで「学習 → レンダリング → 評価」の 3 経路を動かせるようにする。
+docs/issues/feat-007-multi-gpu/README.md:7:- 実機検証（2026-06-18）で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理 GPU N に処理が乗ることを確認済み（**コード修正不要の見込み**）。本案件はその確認の本実行と、運用ルールの文書化が主眼
+docs/issues/feat-007-multi-gpu/README.md:8:- コードの `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、環境変数で物理 GPU を選べる（物理 GPU0 固定ではない）
+docs/issues/feat-007-multi-gpu/README.md:9:- 本体に分散学習機構（DataParallel/DDP）は存在しない。本案件は「**任意の 1 GPU を選ぶ**」運用であり、複数 GPU 同時使用（分散学習）はスコープ外
+docs/issues/feat-007-multi-gpu/README.md:13:1. D-NeRF `bouncingballs` を **GPU≠0** で train → render → metrics の 3 経路すべて完走させる
+docs/issues/feat-007-multi-gpu/README.md:14:2. 学習実行中、`nvidia-smi` で **指定した物理 GPU N にのみ**当該プロセスが乗り、他 GPU（特に GPU0）には乗らないことを確認する
+docs/issues/feat-007-multi-gpu/README.md:15:3. 共用サーバーでの **マルチGPU運用ルール**（GPU 選択・ポート衝突回避・分散非対応）を `CLAUDE.md` と本案件 `design.md` に明文化する
+docs/issues/feat-007-multi-gpu/README.md:17:## 実行コマンド（例。N は実行時に空き GPU を選ぶ）
+docs/issues/feat-007-multi-gpu/README.md:20:# 0) 空き GPU を確認して N を決める（N≠0）
+docs/issues/feat-007-multi-gpu/README.md:28:  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:34:  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:39:  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:46:- **Open**（要求仕様・設計 作成中）
+docs/issues/feat-007-multi-gpu/README.md:47:- 依存: feat-006（D-NeRF 評価動作確認）= Closed
+docs/issues/feat-007-multi-gpu/README.md:48:- 後続: feat-008（COLMAP 環境構築）。Phase 7 以降の実シーン系統は本案件の運用ルールを前提に任意 GPU で動かす
+docs/issues/feat-007-multi-gpu/README.md:55:2. 学習実行中の `nvidia-smi` で、当該 Python プロセスが**物理 GPU N にのみ**現れ、GPU0 を含む他 GPU には現れない（FR-004）
+docs/issues/feat-007-multi-gpu/README.md:56:3. `CLAUDE.md` に「マルチGPU運用ルール」節が追記され、GPU 選択・ポート衝突回避・分散非対応が明文化される（FR-005）
+docs/issues/feat-007-multi-gpu/README.md:62:- `design.md` — 機能設計書（検証フロー・GPU 選択・負荷確認・運用ルール・ADR）
+docs/issues/feat-007-multi-gpu/README.md:63:- `docs/BACKLOG.md` — ロードマップ（Phase 6、feat-007 行）
+docs/issues/feat-007-multi-gpu/README.md:64:- `docs/issues/feat-004-dnerf-train/` `feat-005-dnerf-render/` `feat-006-dnerf-eval/` — 3 経路の単一 GPU 動作確認（本案件の前提）
+docs/issues/feat-007-multi-gpu/README.md:65:- `CLAUDE.md` — 実行環境表・開発方針・（本案件で追記する）マルチGPU運用ルール
+docs/issues/feat-003-dnerf-data/README.md:13:- **Closed**（2026-05-22 完了。FR-001〜005 達成。`data.zip`（246MB）取得→展開→`data/dnerf/` へ全8シーン配置→`bouncingballs` 整合性検証（train=150/test=20、全画像実在、Blender判定構成OK）→クリーンアップ。手動テスト合格）
+docs/issues/feat-003-dnerf-data/README.md:14:- 依存: feat-002（CUDA拡張ビルド）= Closed
+docs/issues/feat-003-dnerf-data/README.md:33:- `docs/BACKLOG.md` — ロードマップ（Phase 2）
+docs/issues/feat-006-dnerf-eval/design.md:23:  │     ├─ torch.cuda.set_device(cuda:0)         ← cuda:0 を固定（CUDA_VISIBLE_DEVICES で物理GPUを選ぶ）
+docs/issues/feat-006-dnerf-eval/design.md:88:- `CUDA_VISIBLE_DEVICES=0` で単一 GPU に固定（ADR-2）。`metrics.py` はコード内で `cuda:0` を固定使用するため、物理 GPU 選択は環境変数で行う
+docs/issues/feat-006-dnerf-eval/design.md:203:### ADR-2: `CUDA_VISIBLE_DEVICES=0` で単一 GPU に固定する
+docs/issues/feat-006-dnerf-eval/design.md:204:本マシンは A100×7。`metrics.py` はコード内で `cuda:0` を固定使用するため、物理 GPU は `CUDA_VISIBLE_DEVICES=0` で 0 番に固定する（再現性）。
+docs/issues/feat-006-dnerf-eval/requirements.md:5:4DGaussians の動作確認の最終段階（環境構築 **Phase 5**）として、feat-005 でレンダリングした D-NeRF 合成シーン `bouncingballs` の test セット（`output/dnerf/bouncingballs/test/ours_20000/{renders,gt}/` 各20枚）を `metrics.py` で評価し、画質指標が算出されることを確認する。本案件は feat-002（CUDA 拡張ビルド）・feat-003（データ配置）・feat-004（学習）・feat-005（レンダリング）の積み上げの最上段に立つ。
+docs/issues/feat-006-dnerf-eval/requirements.md:28:  - 単一 GPU を使用する（`CUDA_VISIBLE_DEVICES` で1枚に固定。`metrics.py` は `cuda:0` を固定使用するため `CUDA_VISIBLE_DEVICES` で物理 GPU を選ぶ）
+docs/issues/feat-006-dnerf-eval/requirements.md:65:- **VRAM**: 40GB に収まること。評価は1枚ずつ GPU に載せて指標計算するのみ（renders/gt を全20枚 list 保持するが 800×800×3 と LPIPS バックボーンで余裕）
+docs/issues/feat-006-dnerf-eval/requirements.md:67:- **再現性**: 実行コマンド・GPU 指定・ログ保存先を design に明記し、`/clear` 後でも同一手順で再実行できること。LPIPS 重みはキャッシュ済みのため再現実行で再 DL されない
+docs/issues/feat-006-dnerf-eval/README.md:5:4DGaussians の動作確認 第4段階（環境構築 **Phase 5**、最終段階）。feat-005 でレンダリングした D-NeRF 合成シーン **`bouncingballs`** の test セット成果物（`output/dnerf/bouncingballs/test/ours_20000/{renders,gt}/` 各20枚）を `metrics.py` で評価し、画質指標 **PSNR / SSIM / LPIPS-vgg / LPIPS-alex / MS-SSIM / D-SSIM** が算出され `results.json` / `per_view.json` が生成されることを確認する。
+docs/issues/feat-006-dnerf-eval/README.md:25:- **Closed**（2026-05-25 完了。約62秒（A100×1）で test 20枚を評価完走、exit code 0。6指標を算出: **PSNR 40.68 / SSIM 0.9943 / LPIPS-vgg 0.0155 / LPIPS-alex 0.0059 / MS-SSIM 0.9954 / D-SSIM 0.0023**（論文 bouncingballs 値とほぼ一致、特に LPIPS-vgg は論文と同値）。`results.json`/`per_view.json` 生成。LPIPS 重みはキャッシュから読込（再 DL なし）。**コード変更ゼロ・不具合なし**。手動テスト合格。**これをもって「D-NeRF が正常動作する環境」の構築完了**）
+docs/issues/feat-006-dnerf-eval/README.md:26:- 依存: feat-005（D-NeRFレンダリング動作確認）= Closed（成果物 `test/ours_20000/{renders,gt}` を評価入力に使う）
+docs/issues/feat-006-dnerf-eval/README.md:27:- 後続: なし（Phase 5 完了 = D-NeRF 動作確認の最終段階）
+docs/issues/feat-006-dnerf-eval/README.md:43:- `docs/BACKLOG.md` — ロードマップ（Phase 5、feat-006 行）
+docs/issues/feat-002-cuda-ext-build/design.md:57:| GPU アーキ | A100 = sm_80 | CUDA 11.6 で完全サポート |
+docs/issues/feat-005-dnerf-render/README.md:5:4DGaussians の動作確認 第3段階（環境構築 Phase 4）。feat-004 で学習した D-NeRF 合成シーン **`bouncingballs`** の学習済みモデルを `render.py` で読み込み、レンダリング画像・動画が生成されることを確認する。学習済み 4D Gaussian と変形フィールドが推論経路で動作することを実証するステップ。
+docs/issues/feat-005-dnerf-render/README.md:27:- **Closed**（2026-05-25 完了。約13秒（A100×1）で test 20 枚＋video 160 枚をレンダリング完走、exit code 0。`test/ours_20000/{renders,gt}` 各20枚・`video/ours_20000/renders` 160枚・両セットの `video_rgb.mp4`（非空）を生成。`point nums: 27769`（feat-004 最終と一致）。**コード変更ゼロ・不具合なし**（Pillow 問題は再発せず）。目視確認①〜④合格。手動テスト合格）
+docs/issues/feat-005-dnerf-render/README.md:28:- 依存: feat-004（D-NeRF学習動作確認）= Closed（成果物 `output/dnerf/bouncingballs/` を入力に使う）
+docs/issues/feat-005-dnerf-render/README.md:46:- `docs/BACKLOG.md` — ロードマップ（Phase 4、feat-005 行）
+docs/issues/feat-002-cuda-ext-build/requirements.md:6:- **なぜ作るのか**: 4DGS の学習・レンダリング・評価は微分可能ガウシアンラスタライザ（`diff_gaussian_rasterization`）と近傍探索（`simple_knn._C`）のCUDA拡張に依存する。これらはプリビルドwheelが提供されず、ソースビルドが必須。本案件は環境構築 Phase 1 にあたり、以降の feat-003〜006（学習〜評価）の前提となる。
+docs/issues/feat-002-cuda-ext-build/requirements.md:82:- **対応環境**: NVIDIA GPU（A100, sm_80）必須。CUDA Toolkit 11.6（`/usr/local/cuda-11.6`、nvcc 11.6.124）必須。gcc/g++ ≤ 11（本マシンは 11.4.0、適合）。
+docs/issues/feat-002-cuda-ext-build/README.md:15:- 依存: feat-001（uv環境構築・依存インストール）= Closed
+docs/issues/feat-002-cuda-ext-build/README.md:38:- `docs/BACKLOG.md` — ロードマップ（Phase 1）
+docs/issues/feat-005-dnerf-render/design.md:43:- `renders/{00000..}.png`（torchvision.save_image, マルチスレッド書き出し）
+docs/issues/feat-005-dnerf-render/design.md:87:- `CUDA_VISIBLE_DEVICES=0` で単一 GPU に固定（ADR-2）
+docs/issues/feat-005-dnerf-render/design.md:192:### ADR-2: `CUDA_VISIBLE_DEVICES=0` で単一 GPU に固定する
+docs/issues/feat-005-dnerf-render/design.md:193:本マシンは A100×7。レンダリングは単一 GPU で十分（CLAUDE.md）。再現性のため 0 番に固定。
+docs/issues/feat-005-dnerf-render/requirements.md:5:4DGaussians の動作確認の第3段階（環境構築 Phase 4）として、feat-004 で学習した D-NeRF 合成シーン `bouncingballs` の学習済みモデルを `render.py` で読み込み、レンダリング画像・動画が生成されることを確認する。本案件は feat-002（CUDA 拡張ビルド）・feat-003（データ配置）・feat-004（学習・成果物生成）の積み上げの上に立ち、学習済み 4D Gaussian と変形フィールドが推論経路で実際に動作することを実証する。
+docs/issues/feat-005-dnerf-render/requirements.md:27:  - 単一 GPU を使用する（`CUDA_VISIBLE_DEVICES` で1枚に固定）
+docs/issues/feat-005-dnerf-render/requirements.md:72:- **再現性**: 実行コマンド・GPU 指定・ログ保存先を design.md に明記し、`/clear` 後でも同一手順で再実行できること
+docs/issues/feat-001-env-setup/design.md:15:| FR-004 GPU認識の検証 | §1.4.4 |
+docs/issues/feat-001-env-setup/design.md:129:     その後 **§1.4.3 の受け入れ確認（全 import）と §1.4.4（GPU検証）の両方を再実行**する（numpy ダウングレードで open3d/imageio 等が壊れていないことを含めて確認するため）。
+docs/issues/feat-001-env-setup/design.md:144:### 1.4.4 FR-004: GPU認識の検証
+docs/issues/feat-001-env-setup/design.md:207:| E5 | `torch.cuda.is_available()` が False | FR-004 の assert 失敗 | 中断・報告。ドライバ／GPU可視性（`CUDA_VISIBLE_DEVICES`）／wheel種別を調査 |
+docs/issues/feat-001-env-setup/design.md:209:| E7 | GPUが0台に見える | `torch.cuda.device_count()==0` | 中断・報告（E5と同様の調査） |
+docs/issues/feat-001-env-setup/design.md:212:- GPUビジー時: 他プロセスがGPUを占有していても、本案件の検証（`is_available`/`get_device_name`）はメモリ確保を伴わないため影響しない。
+docs/issues/feat-001-env-setup/design.md:286:    （PyPI/PyTorch index 由来）には不要。スコープを Phase 0 に限定する。
+docs/issues/feat-001-env-setup/requirements.md:13:  PyTorch がGPU（CUDA 11.6）を認識する再現可能なPython環境が必要である。
+docs/issues/feat-001-env-setup/requirements.md:15:- **どこで使うのか**: `/data/sakagawa/4DGaussians`。GPU=NVIDIA A100-SXM4-40GB（Driver 565.57.01）、
+docs/issues/feat-001-env-setup/requirements.md:73:### FR-004: GPU認識の検証
+docs/issues/feat-001-env-setup/requirements.md:76:- **概要**: venv の PyTorch がCUDA 11.6 を報告し、A100 GPU を認識することを確認する。
+docs/issues/feat-001-env-setup/requirements.md:104:| 対応環境 | Ubuntu Linux、NVIDIA A100（GPU必須）、CUDA 11.6（ビルド用、本案件では実行時のみ間接利用）、uv 0.11.6 |
+docs/issues/feat-004-dnerf-train/README.md:25:- **Closed**（2026-05-22完了。coarse3000+fine20000=計23000反復を約10分（A100×1）で完走。`output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物生成。ITER14000 test PSNR=39.84、最終点数27,769。実装中に Pillow 12.2.0 非互換（`scene/dataset_readers.py:287` `np.byte`→`np.uint8`）を修正（investigation.md イテレーション1）。手動テスト合格）
+docs/issues/feat-004-dnerf-train/README.md:26:- 依存: feat-002（CUDA拡張ビルド）= Closed、feat-003（D-NeRFデータ準備）= Closed
+docs/issues/feat-004-dnerf-train/README.md:44:- `docs/BACKLOG.md` — ロードマップ（Phase 2、feat-004 行）
+docs/issues/feat-001-env-setup/README.md:9:これは環境構築ロードマップ（`docs/BACKLOG.md`）の **Phase 0** に相当し、後続の
+docs/issues/feat-001-env-setup/README.md:35:- `docs/BACKLOG.md` — Phase 0（feat-001）
+docs/issues/feat-004-dnerf-train/design.md:65:- GPU: NVIDIA A100-SXM4-40GB を単一使用。本体は `device="cuda"`（= 可視 GPU の 0 番）を使うため、`CUDA_VISIBLE_DEVICES` で物理 GPU を1枚に固定する
+docs/issues/feat-004-dnerf-train/design.md:77:GPU=0                                              # 使用する物理GPU（全7枚空き、0を使用）
+docs/issues/feat-004-dnerf-train/design.md:85:CUDA_VISIBLE_DEVICES=$GPU "$PY" train.py \
+docs/issues/feat-004-dnerf-train/design.md:95:  - `CUDA_VISIBLE_DEVICES=0` で物理 GPU を1枚に固定（本体は単一 GPU 前提）
+docs/issues/feat-004-dnerf-train/design.md:176:| E3 | VRAM 不足（CUDA out of memory） | ログに `CUDA out of memory` | 他プロセスの GPU 占有を `nvidia-smi` で確認。空き GPU 番号を `CUDA_VISIBLE_DEVICES` に指定 |
+docs/issues/feat-004-dnerf-train/design.md:181:### 1.4.6 GPU 選択の境界条件
+docs/issues/feat-004-dnerf-train/design.md:183:- 調査時点で全7枚の A100 が空き（`nvidia-smi` 確認）。`GPU=0` を使用する
+docs/issues/feat-004-dnerf-train/design.md:184:- 実行直前に `nvidia-smi` で 0 番の空きを再確認し、占有されていれば空き番号に変更する（学習は単一 GPU で完結するため番号は結果に影響しない）
+docs/issues/feat-004-dnerf-train/design.md:233:### ADR-2: `CUDA_VISIBLE_DEVICES=0` で単一 GPU に固定する
+docs/issues/feat-004-dnerf-train/design.md:234:本体は `device="cuda"`（可視 GPU の 0 番）を使う単一 GPU 前提。全7枚空きのうち物理 0 番を割り当て、他作業との干渉を避ける。番号は学習結果に影響しない。
+docs/REVIEW_CRITERIA.md:13:- 各機能の異常系（入力不正、モデル読み込み失敗、GPU メモリ不足等）の振る舞いが定義されているか
+docs/issues/feat-004-dnerf-train/requirements.md:28:  - 単一 GPU を使用する（`CUDA_VISIBLE_DEVICES` で1枚に固定）
+docs/issues/feat-004-dnerf-train/requirements.md:68:- **再現性**: 実行コマンド・GPU 指定・ログ保存先を design.md に明記し、`/clear` 後でも同一手順で再実行できること
+docs/TECH_STACK.md:16:| GPU | NVIDIA A100-SXM4-40GB × 7（Driver 565.57.01） | 4DGSの学習・レンダリングに使用（単一GPUで動作。マルチGPUは非要件） |
+docs/TECH_STACK.md:57:| torch | == 1.13.1（CUDA版サフィックスなし） | テンソル演算・GPU学習 | requirements.txt は `torch==1.13.1`（バージョンは固定だが `+cu116` 等のCUDAサフィックスが付かない）。**cu116版を `--index-url https://download.pytorch.org/whl/cu116` で明示導入**する。CUDA拡張は `/usr/local/cuda-11.6` でビルド（メジャー・マイナー一致）。cu117 + cuda-11.7 でも可 |
+docs/TECH_STACK.md:178:| NVIDIA GPU 必須 | 4DGSの学習・レンダリングに必要 | CUDA拡張がGPU依存 |
+docs/TECH_STACK.md:198:- マルチGPU分散学習
+
+exec
+/bin/bash -lc "rg -n \"DataParallel|DistributedDataParallel|torch\\.distributed|cuda:[0-9]|set_device|device=\\\"cuda\\\"|\\.cuda\\(\" -S --glob '*.py'" in /data/sakagawa/4DGaussians
+ succeeded in 716ms:
+utils/loss_utils.py:41:        window = window.cuda(img1.get_device())
+utils/general_utils.py:71:    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
+utils/general_utils.py:108:    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
+utils/general_utils.py:139:    torch.cuda.set_device(torch.device("cuda:0"))
+train.py:59:    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+train.py:72:    # lpips_model = lpips.LPIPS(net="alex").cuda()
+train.py:185:                gt_image = viewpoint_cam.original_image.cuda()
+train.py:187:                gt_image  = viewpoint_cam['image'].cuda()
+scene/gaussian_model.py:140:        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+scene/gaussian_model.py:141:        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+scene/gaussian_model.py:142:        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+scene/gaussian_model.py:148:        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+scene/gaussian_model.py:150:        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+scene/gaussian_model.py:153:        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+scene/gaussian_model.py:163:        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+scene/gaussian_model.py:164:        self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+scene/gaussian_model.py:167:        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+scene/gaussian_model.py:168:        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+scene/gaussian_model.py:169:        self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
+scene/gaussian_model.py:238:        self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+scene/gaussian_model.py:239:        self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
+scene/gaussian_model.py:244:        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+scene/gaussian_model.py:308:        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+scene/gaussian_model.py:309:        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+scene/gaussian_model.py:310:        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+scene/gaussian_model.py:311:        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+scene/gaussian_model.py:312:        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
+scene/gaussian_model.py:313:        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+scene/gaussian_model.py:410:        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+scene/gaussian_model.py:411:        self._deformation_accum = torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
+scene/gaussian_model.py:412:        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+scene/gaussian_model.py:413:        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+scene/gaussian_model.py:418:        padded_grad = torch.zeros((n_init_points), device="cuda")
+scene/gaussian_model.py:428:        means =torch.zeros((stds.size(0), 3),device="cuda")
+scene/gaussian_model.py:440:        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+scene/dataset_readers.py:487:    w2c = torch.tensor(w2c).cuda().float()
+scene/dataset_readers.py:493:                                [0.0, 0.0, 1.0, 0.0]]).cuda().float().unsqueeze(0).transpose(1, 2)
+scene/dataset_readers.py:500:        bg=torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda"),
+scene/cameras.py:60:        # .cuda()
+scene/cameras.py:62:        # .cuda()
+render.py:66:                gt  = view['image'].cuda()
+render.py:84:        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+metrics.py:31:        renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
+metrics.py:32:        gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3, :, :].cuda())
+metrics.py:116:    device = torch.device("cuda:0")
+metrics.py:117:    torch.cuda.set_device(device)
+merge_many_4dgs.py:77:            screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+merge_many_4dgs.py:79:            screenspace_points1 = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+merge_many_4dgs.py:92:        viewmatrix=viewpoint_camera.world_view_transform.cuda(),
+merge_many_4dgs.py:93:        projmatrix=viewpoint_camera.full_proj_transform.cuda(),
+merge_many_4dgs.py:95:        campos=viewpoint_camera.camera_center.cuda(),
+merge_many_4dgs.py:150:        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+gaussian_renderer/network_gui.py:74:            world_view_transform = torch.reshape(torch.tensor(message["view_matrix"]), (4, 4)).cuda()
+gaussian_renderer/network_gui.py:77:            full_proj_transform = torch.reshape(torch.tensor(message["view_projection_matrix"]), (4, 4)).cuda()
+gaussian_renderer/__init__.py:26:    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+gaussian_renderer/__init__.py:45:            viewmatrix=viewpoint_camera.world_view_transform.cuda(),
+gaussian_renderer/__init__.py:46:            projmatrix=viewpoint_camera.full_proj_transform.cuda(),
+gaussian_renderer/__init__.py:48:            campos=viewpoint_camera.camera_center.cuda(),
+gaussian_renderer/__init__.py:108:            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.cuda().repeat(pc.get_features.shape[0], 1))
+export_perframe_3DGS.py:28:        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+codex
+CLAUDE.md/BACKLOGとの関係も見ました。現時点では、レビュー対象として本当に問題になり得るのは「完走可否」「成果物の検証可否」「運用ルールが逆に事故を誘発しないか」に限定して評価しています。
+exec
+/bin/bash -lc "sed -n '1,180p' .gitignore" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,140p' gaussian_renderer/network_gui.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '296,335p' train.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,140p' scene/__init__.py" in /data/sakagawa/4DGaussians
+ succeeded in 1130ms:
+*.pyc
+.vscode
+output
+build
+diff_rasterization/diff_rast.egg-info
+diff_rasterization/dist
+tensorboard_3d
+screenshots
+data/
+data
+submodules/
+
+# Claude Code のローカル作業ファイル（handover・ローカル設定）。公開フォークに出さない
+.claude/
+.venv/
+
+ succeeded in 1093ms:
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import os
+import random
+import json
+from utils.system_utils import searchForMaxIteration
+from scene.dataset_readers import sceneLoadTypeCallbacks
+from scene.gaussian_model import GaussianModel
+from scene.dataset import FourDGSdataset
+from arguments import ModelParams
+from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from torch.utils.data import Dataset
+from scene.dataset_readers import add_points
+class Scene:
+
+    gaussians : GaussianModel
+
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], load_coarse=False):
+        """b
+        :param path: Path to colmap scene main folder.
+        """
+        self.model_path = args.model_path
+        self.loaded_iter = None
+        self.gaussians = gaussians
+        
+        if load_iteration:
+            if load_iteration == -1:
+                self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
+            else:
+                self.loaded_iter = load_iteration
+            print("Loading trained model at iteration {}".format(self.loaded_iter))
+
+        self.train_cameras = {}
+        self.test_cameras = {}
+        self.video_cameras = {}
+        if os.path.exists(os.path.join(args.source_path, "sparse")):
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, args.llffhold)
+            dataset_type="colmap"
+        elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
+            print("Found transforms_train.json file, assuming Blender data set!")
+            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.extension)
+            dataset_type="blender"
+        elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")):
+            scene_info = sceneLoadTypeCallbacks["dynerf"](args.source_path, args.white_background, args.eval)
+            dataset_type="dynerf"
+        elif os.path.exists(os.path.join(args.source_path,"dataset.json")):
+            scene_info = sceneLoadTypeCallbacks["nerfies"](args.source_path, False, args.eval)
+            dataset_type="nerfies"
+        elif os.path.exists(os.path.join(args.source_path,"train_meta.json")):
+            scene_info = sceneLoadTypeCallbacks["PanopticSports"](args.source_path)
+            dataset_type="PanopticSports"
+        elif os.path.exists(os.path.join(args.source_path,"points3D_multipleview.ply")):
+            scene_info = sceneLoadTypeCallbacks["MultipleView"](args.source_path)
+            dataset_type="MultipleView"
+        else:
+            assert False, "Could not recognize scene type!"
+        self.maxtime = scene_info.maxtime
+        self.dataset_type = dataset_type
+        self.cameras_extent = scene_info.nerf_normalization["radius"]
+        print("Loading Training Cameras")
+        self.train_camera = FourDGSdataset(scene_info.train_cameras, args, dataset_type)
+        print("Loading Test Cameras")
+        self.test_camera = FourDGSdataset(scene_info.test_cameras, args, dataset_type)
+        print("Loading Video Cameras")
+        self.video_camera = FourDGSdataset(scene_info.video_cameras, args, dataset_type)
+
+        # self.video_camera = cameraList_from_camInfos(scene_info.video_cameras,-1,args)
+        xyz_max = scene_info.point_cloud.points.max(axis=0)
+        xyz_min = scene_info.point_cloud.points.min(axis=0)
+        if args.add_points:
+            print("add points.")
+            # breakpoint()
+            scene_info = scene_info._replace(point_cloud=add_points(scene_info.point_cloud, xyz_max=xyz_max, xyz_min=xyz_min))
+        self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+        if self.loaded_iter:
+            self.gaussians.load_ply(os.path.join(self.model_path,
+                                                           "point_cloud",
+                                                           "iteration_" + str(self.loaded_iter),
+                                                           "point_cloud.ply"))
+            self.gaussians.load_model(os.path.join(self.model_path,
+                                                    "point_cloud",
+                                                    "iteration_" + str(self.loaded_iter),
+                                                   ))
+        else:
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
+
+    def save(self, iteration, stage):
+        if stage == "coarse":
+            point_cloud_path = os.path.join(self.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
+
+        else:
+            point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+        self.gaussians.save_deformation(point_cloud_path)
+    def getTrainCameras(self, scale=1.0):
+        return self.train_camera
+
+    def getTestCameras(self, scale=1.0):
+        return self.test_camera
+    def getVideoCameras(self, scale=1.0):
+        return self.video_camera
+ succeeded in 1152ms:
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import torch
+import traceback
+import socket
+import json
+from scene.cameras import MiniCam
+
+host = "127.0.0.1"
+port = 6009
+
+conn = None
+addr = None
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+def init(wish_host, wish_port):
+    global host, port, listener
+    host = wish_host
+    port = wish_port
+    listener.bind((host, port))
+    listener.listen()
+    listener.settimeout(0)
+
+def try_connect():
+    global conn, addr, listener
+    try:
+        conn, addr = listener.accept()
+        print(f"\nConnected by {addr}")
+        conn.settimeout(None)
+    except Exception as inst:
+        pass
+            
+def read():
+    global conn
+    messageLength = conn.recv(4)
+    messageLength = int.from_bytes(messageLength, 'little')
+    message = conn.recv(messageLength)
+    return json.loads(message.decode("utf-8"))
+
+def send(message_bytes, verify):
+    global conn
+    if message_bytes != None:
+        conn.sendall(message_bytes)
+    conn.sendall(len(verify).to_bytes(4, 'little'))
+    conn.sendall(bytes(verify, 'ascii'))
+
+def receive():
+    message = read()
+
+    width = message["resolution_x"]
+    height = message["resolution_y"]
+
+    if width != 0 and height != 0:
+        try:
+            do_training = bool(message["train"])
+            fovy = message["fov_y"]
+            fovx = message["fov_x"]
+            znear = message["z_near"]
+            zfar = message["z_far"]
+            do_shs_python = bool(message["shs_python"])
+            do_rot_scale_python = bool(message["rot_scale_python"])
+            keep_alive = bool(message["keep_alive"])
+            scaling_modifier = message["scaling_modifier"]
+            world_view_transform = torch.reshape(torch.tensor(message["view_matrix"]), (4, 4)).cuda()
+            world_view_transform[:,1] = -world_view_transform[:,1]
+            world_view_transform[:,2] = -world_view_transform[:,2]
+            full_proj_transform = torch.reshape(torch.tensor(message["view_projection_matrix"]), (4, 4)).cuda()
+            full_proj_transform[:,1] = -full_proj_transform[:,1]
+            custom_cam = MiniCam(width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform,time=0)
+        except Exception as e:
+            print("")
+            traceback.print_exc()
+            raise e
+        return custom_cam, do_training, do_shs_python, do_rot_scale_python, keep_alive, scaling_modifier
+    else:
+        return None, None, None, None, None, None
+ succeeded in 1157ms:
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
+def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
+    # first_iter = 0
+    tb_writer = prepare_output_and_logger(expname)
+    gaussians = GaussianModel(dataset.sh_degree, hyper)
+    dataset.model_path = args.model_path
+    timer = Timer()
+    scene = Scene(dataset, gaussians, load_coarse=None)
+    timer.start()
+    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+                             checkpoint_iterations, checkpoint, debug_from,
+                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer)
+    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+                         checkpoint_iterations, checkpoint, debug_from,
+                         gaussians, scene, "fine", tb_writer, opt.iterations,timer)
+
+def prepare_output_and_logger(expname):    
+    if not args.model_path:
+        # if os.getenv('OAR_JOB_ID'):
+        #     unique_str=os.getenv('OAR_JOB_ID')
+        # else:
+        #     unique_str = str(uuid.uuid4())
+        unique_str = expname
+
+        args.model_path = os.path.join("./output/", unique_str)
+    # Set up output folder
+    print("Output folder: {}".format(args.model_path))
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+
+    # Create Tensorboard writer
+    tb_writer = None
+    if TENSORBOARD_FOUND:
+        tb_writer = SummaryWriter(args.model_path)
+    else:
+        print("Tensorboard not available: not logging progress")
+    return tb_writer
+
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, stage, dataset_type):
+
+exec
+/bin/bash -lc "sed -n '1,120p' arguments/dnerf/bouncingballs.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,220p' utils/params_utils.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,180p' arguments/dnerf/default.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "find docs/issues/feat-007-multi-gpu -maxdepth 1 -type f -printf '%f\\n' | sort" in /data/sakagawa/4DGaussians
+ succeeded in 1086ms:
+_base_ = './dnerf_default.py'
+
+ModelHiddenParams = dict(
+    kplanes_config = {
+     'grid_dimensions': 2,
+     'input_coordinate_dim': 4,
+     'output_coordinate_dim': 32,
+     'resolution': [64, 64, 64, 75]
+    }
+)
+ succeeded in 1062ms:
+README.md
+design.md
+requirements.md
+
+ exited 2 in 1149ms:
+sed: can't read arguments/dnerf/default.py: No such file or directory
+
+ succeeded in 1351ms:
+def merge_hparams(args, config):
+    params = ["OptimizationParams", "ModelHiddenParams", "ModelParams", "PipelineParams"]
+    for param in params:
+        if param in config.keys():
+            for key, value in config[param].items():
+                if hasattr(args, key):
+                    setattr(args, key, value)
+
+    return args
+codex
+設定ファイルのマージ処理も確認しました。`--configs arguments/dnerf/bouncingballs.py` が `model_path` を上書きする形ではないので、対象コマンドの出力先指定は成立しています。
+exec
+/bin/bash -lc 'rg -n "dnerf_default|OptimizationParams|ModelParams|PipelineParams" arguments -S' in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc 'rg -n "feat007|bouncingballs_feat007|6107|CUDA_VISIBLE_DEVICES" docs/issues/feat-007-multi-gpu/README.md docs/issues/feat-007-multi-gpu/requirements.md docs/issues/feat-007-multi-gpu/design.md -S' in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc 'git status --short' in /data/sakagawa/4DGaussians
+ succeeded in 839ms:
+arguments/multipleview/default.py:22:OptimizationParams = dict(
+arguments/hypernerf/default.py:16:OptimizationParams = dict(
+arguments/hypernerf/chicken.py:2:ModelParams=dict(
+arguments/hypernerf/chicken.py:10:OptimizationParams=dict(
+arguments/hypernerf/broom2.py:2:ModelParams=dict(
+arguments/hypernerf/broom2.py:10:OptimizationParams=dict(
+arguments/hypernerf/banana.py:2:ModelParams=dict(
+arguments/hypernerf/banana.py:10:OptimizationParams=dict(
+arguments/dycheck/default.py:16:OptimizationParams = dict(
+arguments/dnerf/trex.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/standup.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/mutant.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/lego.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/jumpingjacks.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/hook.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/hellwarrior.py:1:_base_ = './dnerf_default.py'
+arguments/dnerf/dnerf_default.py:3:OptimizationParams = dict(
+arguments/dnerf/bouncingballs.py:1:_base_ = './dnerf_default.py'
+arguments/dynerf/sear_steak.py:2:OptimizationParams = dict(
+arguments/dynerf/flame_steak.py:2:OptimizationParams = dict(
+arguments/dynerf/flame_salmon_1.py:2:OptimizationParams = dict(
+arguments/dynerf/default.py:22:OptimizationParams = dict(
+arguments/dynerf/cut_roasted_beef.py:2:OptimizationParams = dict(
+arguments/dynerf/cook_spinach.py:2:OptimizationParams = dict(
+arguments/dynerf/coffee_martini.py:2:OptimizationParams = dict(
+arguments/hypernerf/3dprinter.py:2:ModelParams=dict(
+arguments/hypernerf/3dprinter.py:10:OptimizationParams=dict(
+arguments/__init__.py:47:class ModelParams(ParamGroup): 
+arguments/__init__.py:68:class PipelineParams(ParamGroup):
+arguments/__init__.py:109:class OptimizationParams(ParamGroup):
+
+ succeeded in 847ms:
+docs/issues/feat-007-multi-gpu/design.md:15:本案件は**コードを変更しない**。設計の中心は「`cuda:0` / `cuda` のハードコードがあるにもかかわらず `CUDA_VISIBLE_DEVICES=N` で物理 GPU N に乗る」というデバイス選択メカニズムを明示し、3 経路を GPU≠0 で完走させる手順と、負荷が指定 GPU に限定されることの確認方法、そして運用ルールの文面を確定することにある。
+docs/issues/feat-007-multi-gpu/design.md:22:環境変数 CUDA_VISIBLE_DEVICES=N
+docs/issues/feat-007-multi-gpu/design.md:35:要点: `cuda:0` は「**マスク後の論理デバイス先頭**」であり「物理 GPU0」ではない。`CUDA_VISIBLE_DEVICES=N` を与えた瞬間、論理 `cuda:0` の実体は物理 GPU N になる。したがってコードを変えずに物理 GPU を選べる（実機検証 2026-06-18 で N=5 を確認済み）。
+docs/issues/feat-007-multi-gpu/design.md:52:output/dnerf/bouncingballs_feat007/       # 本案件の生成物（feat-004〜006 とは別パス）
+docs/issues/feat-007-multi-gpu/design.md:58:/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log   # ログ（リポジトリ外）
+docs/issues/feat-007-multi-gpu/design.md:64:- GPU 選択: 環境変数 `CUDA_VISIBLE_DEVICES`（コード変更なし。ADR-1）
+docs/issues/feat-007-multi-gpu/design.md:86:mkdir -p /data/sakagawa/tmp/feat007-multi-gpu
+docs/issues/feat-007-multi-gpu/design.md:88:# 1) 学習（--port は 6107 を既定とする。理由は §1.4.4 E4 / ADR-4）
+docs/issues/feat-007-multi-gpu/design.md:89:CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py \
+docs/issues/feat-007-multi-gpu/design.md:90:  -s data/dnerf/bouncingballs --port 6107 \
+docs/issues/feat-007-multi-gpu/design.md:91:  --expname "dnerf/bouncingballs_feat007" \
+docs/issues/feat-007-multi-gpu/design.md:93:  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:96:CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py \
+docs/issues/feat-007-multi-gpu/design.md:97:  --model_path "output/dnerf/bouncingballs_feat007/" --skip_train \
+docs/issues/feat-007-multi-gpu/design.md:99:  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:102:CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py \
+docs/issues/feat-007-multi-gpu/design.md:103:  --model_paths output/dnerf/bouncingballs_feat007/ \
+docs/issues/feat-007-multi-gpu/design.md:104:  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:107:- `--expname "dnerf/bouncingballs_feat007"` で出力先を `output/dnerf/bouncingballs_feat007/` に分離（既存 feat-004〜006 成果物を保護。ADR-2）。
+docs/issues/feat-007-multi-gpu/design.md:108:- render/metrics の `--model_path`/`--model_paths` は学習と同じ `output/dnerf/bouncingballs_feat007/` を指す。
+docs/issues/feat-007-multi-gpu/design.md:109:- 各経路は **`CUDA_VISIBLE_DEVICES=N` を行頭に付ける**のが唯一の差分。それ以外は feat-004〜006 と同一コマンド。
+docs/issues/feat-007-multi-gpu/design.md:117:| 学習 | 終了コード 0。`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` 生成。ログに coarse(〜3000)→fine(〜20000) の進捗と最終 point 数 |
+docs/issues/feat-007-multi-gpu/design.md:132:1. `train.py` の Python PID（`train.log` 起動時の PID、または `pgrep -f "train.py.*bouncingballs_feat007"`）を特定する。
+docs/issues/feat-007-multi-gpu/design.md:138:**注意**: `nvidia-smi` 全体の index は物理番号。`CUDA_VISIBLE_DEVICES=N` 下のプロセス内では論理 `cuda:0` だが、`nvidia-smi` の Processes 欄は**物理 GPU N**に紐づけて表示する（ここが確認ポイント）。
+docs/issues/feat-007-multi-gpu/design.md:146:| E3 | `CUDA_VISIBLE_DEVICES` を付け忘れる | 既定で論理 `cuda:0`＝物理 GPU0 を使い、GPU0 が混雑なら OOM | 運用ルール（§1.4.5）で必須化。3 経路すべてに付ける |
+docs/issues/feat-007-multi-gpu/design.md:147:| E4 | 学習の並行実行でポート衝突 | 2 つ目の `train.py` が `network_gui.init`（既定 6009）で bind 失敗しうる | 学習を並行起動する場合は `--port` を実行ごとに変える（公式 `scripts/*.sh` と同方針）。本案件は単発実行で 6107 を使う。render/metrics はポート不使用のため無関係。**network_gui の bind 失敗時の正確な挙動は U3 で実地確認** |
+docs/issues/feat-007-multi-gpu/design.md:148:| E5 | 学習成果物の出力先が既存と衝突 | `output/dnerf/bouncingballs/` を上書き | `--expname dnerf/bouncingballs_feat007` で別パスに分離（ADR-2）。誤って同一 expname を使わない |
+docs/issues/feat-007-multi-gpu/design.md:162:> 2. **`CUDA_VISIBLE_DEVICES=N` を付けて実行する**。同一ジョブの 3 経路（train/render/metrics）は同一 N を使う。
+docs/issues/feat-007-multi-gpu/design.md:163:>    例: `CUDA_VISIBLE_DEVICES=3 .venv/bin/python train.py ...`
+docs/issues/feat-007-multi-gpu/design.md:164:> 3. コード内の `cuda:0` / `cuda`（`utils/general_utils.py:139`、`metrics.py:116-117`、`render.py`）は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU N に乗る。**コード変更は不要**（物理 GPU0 固定ではない）。
+docs/issues/feat-007-multi-gpu/design.md:176:   → 学習 train.py (CUDA_VISIBLE_DEVICES=N)  ─（稼働中に別シェルで nvidia-smi → FR-004 負荷限定確認）
+docs/issues/feat-007-multi-gpu/design.md:193:**生成物**: `output/dnerf/bouncingballs_feat007/`（学習・レンダリング・評価成果物。`.gitignore` 管理外・非コミット）。ログは `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`。
+docs/issues/feat-007-multi-gpu/design.md:201:- 環境変数: `CUDA_VISIBLE_DEVICES=N`（N=物理 GPU 番号、本案件は N≠0）
+docs/issues/feat-007-multi-gpu/design.md:209:- ログ保存先: `/data/sakagawa/tmp/feat007-multi-gpu/{train,render,metrics}.log`（リポジトリ外、隔離）
+docs/issues/feat-007-multi-gpu/design.md:216:  - `ls output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply`
+docs/issues/feat-007-multi-gpu/design.md:217:  - `ls output/dnerf/bouncingballs_feat007/test/ours_20000/renders/ | wc -l`（20）
+docs/issues/feat-007-multi-gpu/design.md:218:  - `.venv/bin/python -c "import json; print(json.load(open('output/dnerf/bouncingballs_feat007/results.json'))['ours_20000'])"`
+docs/issues/feat-007-multi-gpu/design.md:223:### ADR-1: コードは変更せず `CUDA_VISIBLE_DEVICES` で物理 GPU を選ぶ
+docs/issues/feat-007-multi-gpu/design.md:224:**採用**: `cuda:0` / `cuda` は `CUDA_VISIBLE_DEVICES` でマスクした後の論理先頭を指すため、環境変数だけで物理 GPU を選べる（実機検証 2026-06-18・N=5 で確認）。
+docs/issues/feat-007-multi-gpu/design.md:227:### ADR-2: 検証は専用 expname（`dnerf/bouncingballs_feat007`）で行う
+docs/issues/feat-007-multi-gpu/design.md:234:### ADR-4: 単発実行の `--port` は 6107 を既定とする
+docs/issues/feat-007-multi-gpu/design.md:246:- U1: `CUDA_VISIBLE_DEVICES=N`（N≠0）で 3 経路がいずれも exit 0 で完走し、成果物が生成されるか
+docs/issues/feat-007-multi-gpu/design.md:248:- U3: `--port 6107` での network_gui 初期化が正常か。並行実行時のポート衝突挙動（bind 失敗が学習をクラッシュさせるか握りつぶすか）の確認（参考）
+docs/issues/feat-007-multi-gpu/requirements.md:7:**なぜ作るのか**: 本マシンは複数人が共用しており、GPU0 が他者に使われている／空いていないことが常態である。Phase 0-5（D-NeRF 動作確認）は GPU0（`CUDA_VISIBLE_DEVICES=0`）固定で実施したが、共用環境では**空いている任意の GPU を選んで実行できる**必要がある。また Phase 7 以降の実シーン 3 系統（HyperNeRF/DyNeRF/multipleview）も同じ運用で動かすため、ここで運用方式を確定・文書化しておく。
+docs/issues/feat-007-multi-gpu/requirements.md:14:- GPU 固定箇所は `utils/general_utils.py:139`（`safe_state` 内、train/render が呼ぶ）と `metrics.py:116-117`（`__main__`）の 2 か所のみ。いずれも `torch.device("cuda:0")` を `set_device` する。render.py は加えて `device="cuda"` / `.cuda()` を使う。これら `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、物理 GPU0 固定ではない。
+docs/issues/feat-007-multi-gpu/requirements.md:16:- 公式スクリプト群（`scripts/*.sh`）は既に `export CUDA_VISIBLE_DEVICES=N&&python ...` で GPU 0〜3 を使い分けており、本案件の運用方式は公式の想定と一致する。
+docs/issues/feat-007-multi-gpu/requirements.md:17:- 2026-06-18 の実機検証で `CUDA_VISIBLE_DEVICES=5` 指定下にプロセスが物理 GPU5 に乗ることを確認済み。
+docs/issues/feat-007-multi-gpu/requirements.md:21:- **物理 GPU 番号**: `nvidia-smi` が表示する GPU の通し番号（本マシンは 0〜6）。`CUDA_VISIBLE_DEVICES=N` の N に与える値。
+docs/issues/feat-007-multi-gpu/requirements.md:22:- **論理デバイス**: PyTorch が見る GPU。`CUDA_VISIBLE_DEVICES=N` を設定すると、物理 GPU N が論理デバイス `cuda:0`（先頭）として見える。本体コードの `cuda:0` / `cuda` はこの論理先頭を指す。
+docs/issues/feat-007-multi-gpu/requirements.md:26:- **expname**: `train.py --expname` で与える実験名。出力先 `output/{expname}/` を決める。本案件は既存成果物（`output/dnerf/bouncingballs/`、feat-004〜006）を上書きしないため `dnerf/bouncingballs_feat007` を用いる。
+docs/issues/feat-007-multi-gpu/requirements.md:33:- `CUDA_VISIBLE_DEVICES=N`（N は 0 以外の空き物理 GPU）を付けて `train.py` を D-NeRF `bouncingballs` で実行し、クラッシュせず完走する。
+docs/issues/feat-007-multi-gpu/requirements.md:35:  - `CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py -s data/dnerf/bouncingballs --port 6107 --expname "dnerf/bouncingballs_feat007" --configs arguments/dnerf/bouncingballs.py`
+docs/issues/feat-007-multi-gpu/requirements.md:36:- 出力: 標準出力に coarse/fine の学習進捗、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_{14000,20000}/point_cloud.ply` ほか成果物
+docs/issues/feat-007-multi-gpu/requirements.md:38:- 受け入れ基準: プロセスが終了コード 0 で終了し、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` が生成される（feat-004 の判定基準に準ずる）。`CUDA error: invalid device ordinal` 等の GPU 起因エラーが出ないこと。
+docs/issues/feat-007-multi-gpu/requirements.md:43:- 入力: `CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py --model_path "output/dnerf/bouncingballs_feat007/" --skip_train --configs arguments/dnerf/bouncingballs.py`
+docs/issues/feat-007-multi-gpu/requirements.md:44:- 出力: `output/dnerf/bouncingballs_feat007/test/ours_20000/{renders,gt}/` 各 20 枚、`video/ours_20000/renders/` と各 `video_rgb.mp4`
+docs/issues/feat-007-multi-gpu/requirements.md:51:- 入力: `CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py --model_paths output/dnerf/bouncingballs_feat007/`
+docs/issues/feat-007-multi-gpu/requirements.md:52:- 出力: 標準出力に 6 指標（SSIM/PSNR/LPIPS-vgg/LPIPS-alex/MS-SSIM/D-SSIM）、`output/dnerf/bouncingballs_feat007/{results,per_view}.json`
+docs/issues/feat-007-multi-gpu/requirements.md:69:  2. `CUDA_VISIBLE_DEVICES=N` を付けて train/render/metrics を実行する（同一ジョブの 3 経路は同一 N を使う）
+docs/issues/feat-007-multi-gpu/requirements.md:89:- **隔離性**: ログ等の一時生成物はリポジトリ外（`/data/sakagawa/tmp/feat007-multi-gpu/`）に置く。成果物は `output/dnerf/bouncingballs_feat007/`（`.gitignore` 管理外・非コミット）。
+docs/issues/feat-007-multi-gpu/requirements.md:95:- 既存成果物 `output/dnerf/bouncingballs/`（feat-004〜006）を上書きしない。本案件は `output/dnerf/bouncingballs_feat007/` を使う。
+docs/issues/feat-007-multi-gpu/requirements.md:99:- GPU 選択は `CUDA_VISIBLE_DEVICES` で行う（コード内 `set_device` の引数化はしない＝本体改変回避）。
+docs/issues/feat-007-multi-gpu/README.md:7:- 実機検証（2026-06-18）で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理 GPU N に処理が乗ることを確認済み（**コード修正不要の見込み**）。本案件はその確認の本実行と、運用ルールの文書化が主眼
+docs/issues/feat-007-multi-gpu/README.md:8:- コードの `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、環境変数で物理 GPU を選べる（物理 GPU0 固定ではない）
+docs/issues/feat-007-multi-gpu/README.md:24:CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py \
+docs/issues/feat-007-multi-gpu/README.md:25:  -s data/dnerf/bouncingballs --port 6107 \
+docs/issues/feat-007-multi-gpu/README.md:26:  --expname "dnerf/bouncingballs_feat007" \
+docs/issues/feat-007-multi-gpu/README.md:28:  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:31:CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py \
+docs/issues/feat-007-multi-gpu/README.md:32:  --model_path "output/dnerf/bouncingballs_feat007/" --skip_train \
+docs/issues/feat-007-multi-gpu/README.md:34:  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:37:CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py \
+docs/issues/feat-007-multi-gpu/README.md:38:  --model_paths output/dnerf/bouncingballs_feat007/ \
+docs/issues/feat-007-multi-gpu/README.md:39:  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:54:1. `CUDA_VISIBLE_DEVICES=N`（N≠0）で train.py / render.py / metrics.py の 3 経路がいずれも終了コード 0 で完走し、`output/dnerf/bouncingballs_feat007/` 配下に各段階の成果物（point_cloud.ply / test 画像 / results.json）が生成される（FR-001〜003）
+
+ succeeded in 1003ms:
+ M docs/BACKLOG.md
+ ? submodules/depth-diff-gaussian-rasterization
+ ? submodules/simple-knn
+?? docs/issues/feat-007-multi-gpu/
+
+codex
+作業ツリーはレビュー対象ドキュメント追加と既存BACKLOG更新がある状態ですが、レビューなので変更は加えていません。最後に、検証手順として不足すると致命的になり得るログ/PID取得まわりだけ確認して結論をまとめます。
+exec
+/bin/bash -lc "sed -n '1,120p' docs/issues/feat-007-multi-gpu/README.md" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '1,120p' arguments/dnerf/dnerf_default.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "rg -n \"run_in_background|PID|pgrep|train.log 起動時|起動時の PID|echo \\"'$!|nohup|&" docs/issues/feat-007-multi-gpu/requirements.md docs/issues/feat-007-multi-gpu/design.md docs/issues/feat-007-multi-gpu/README.md -S' in /data/sakagawa/4DGaussians
+ succeeded in 973ms:
+# feat-007: マルチGPU運用対応（任意GPU選択）
+
+## 概要
+
+4DGaussians 全体動作環境への拡張 **Phase 6**。複数人共用 GPU サーバー（A100-SXM4-40GB × 7）で、**GPU0 以外の空いている任意の 1 枚**を選んで「学習 → レンダリング → 評価」の 3 経路を動かせるようにする。
+
+- 実機検証（2026-06-18）で `CUDA_VISIBLE_DEVICES=N`（N≠0）だけで物理 GPU N に処理が乗ることを確認済み（**コード修正不要の見込み**）。本案件はその確認の本実行と、運用ルールの文書化が主眼
+- コードの `cuda:0` / `cuda` は **`CUDA_VISIBLE_DEVICES` でマスクした後の論理デバイス先頭**を指すため、環境変数で物理 GPU を選べる（物理 GPU0 固定ではない）
+- 本体に分散学習機構（DataParallel/DDP）は存在しない。本案件は「**任意の 1 GPU を選ぶ**」運用であり、複数 GPU 同時使用（分散学習）はスコープ外
+
+## 本案件で行うこと
+
+1. D-NeRF `bouncingballs` を **GPU≠0** で train → render → metrics の 3 経路すべて完走させる
+2. 学習実行中、`nvidia-smi` で **指定した物理 GPU N にのみ**当該プロセスが乗り、他 GPU（特に GPU0）には乗らないことを確認する
+3. 共用サーバーでの **マルチGPU運用ルール**（GPU 選択・ポート衝突回避・分散非対応）を `CLAUDE.md` と本案件 `design.md` に明文化する
+
+## 実行コマンド（例。N は実行時に空き GPU を選ぶ）
+
+```bash
+# 0) 空き GPU を確認して N を決める（N≠0）
+nvidia-smi
+
+# 1) 学習（feat-004 と別 expname で既存成果物を汚さない）
+CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py \
+  -s data/dnerf/bouncingballs --port 6107 \
+  --expname "dnerf/bouncingballs_feat007" \
+  --configs arguments/dnerf/bouncingballs.py \
+  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+
+# 2) レンダリング
+CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py \
+  --model_path "output/dnerf/bouncingballs_feat007/" --skip_train \
+  --configs arguments/dnerf/bouncingballs.py \
+  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+
+# 3) 評価
+CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py \
+  --model_paths output/dnerf/bouncingballs_feat007/ \
+  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+```
+
+（詳細・ポート選定・負荷確認手順は `design.md` を参照）
+
+## ステータス
+
+- **Open**（要求仕様・設計 作成中）
+- 依存: feat-006（D-NeRF 評価動作確認）= Closed
+- 後続: feat-008（COLMAP 環境構築）。Phase 7 以降の実シーン系統は本案件の運用ルールを前提に任意 GPU で動かす
+
+## 判定基準
+
+以下が**いずれも満たされる**こと（詳細・受け入れ基準は requirements.md / design.md）:
+
+1. `CUDA_VISIBLE_DEVICES=N`（N≠0）で train.py / render.py / metrics.py の 3 経路がいずれも終了コード 0 で完走し、`output/dnerf/bouncingballs_feat007/` 配下に各段階の成果物（point_cloud.ply / test 画像 / results.json）が生成される（FR-001〜003）
+2. 学習実行中の `nvidia-smi` で、当該 Python プロセスが**物理 GPU N にのみ**現れ、GPU0 を含む他 GPU には現れない（FR-004）
+3. `CLAUDE.md` に「マルチGPU運用ルール」節が追記され、GPU 選択・ポート衝突回避・分散非対応が明文化される（FR-005）
+4. 上記を達成するために 4DGaussians 本体のコードを変更していない（FR-006・コード変更ゼロ）
+
+## 関連ドキュメント
+
+- `requirements.md` — 要求仕様書（FR-001〜006）
+- `design.md` — 機能設計書（検証フロー・GPU 選択・負荷確認・運用ルール・ADR）
+- `docs/BACKLOG.md` — ロードマップ（Phase 6、feat-007 行）
+- `docs/issues/feat-004-dnerf-train/` `feat-005-dnerf-render/` `feat-006-dnerf-eval/` — 3 経路の単一 GPU 動作確認（本案件の前提）
+- `CLAUDE.md` — 実行環境表・開発方針・（本案件で追記する）マルチGPU運用ルール
+
+ succeeded in 999ms:
+
+
+OptimizationParams = dict(
+
+    coarse_iterations = 3000,
+    deformation_lr_init = 0.00016,
+    deformation_lr_final = 0.0000016,
+    deformation_lr_delay_mult = 0.01,
+    grid_lr_init = 0.0016,
+    grid_lr_final = 0.000016,
+    iterations = 20000,
+    pruning_interval = 8000,
+    percent_dense = 0.01,
+    render_process=False,
+    # no_do=False,
+    # no_dshs=False
+    
+    # opacity_reset_interval=30000
+
+)
+
+ModelHiddenParams = dict(
+
+    multires = [1, 2],
+    defor_depth = 0,
+    net_width = 64,
+    plane_tv_weight = 0.0001,
+    time_smoothness_weight = 0.01,
+    l1_time_planes =  0.0001,
+    weight_decay_iteration=0,
+    bounds=1.6
+)
+
+ succeeded in 1403ms:
+docs/issues/feat-007-multi-gpu/requirements.md:16:- 公式スクリプト群（`scripts/*.sh`）は既に `export CUDA_VISIBLE_DEVICES=N&&python ...` で GPU 0〜3 を使い分けており、本案件の運用方式は公式の想定と一致する。
+docs/issues/feat-007-multi-gpu/requirements.md:60:- 出力: GPU N の行に当該 PID と GPU メモリ消費が表示され、他 GPU 行に当該 PID が無いことの記録（ログ／スクリーンショット相当のテキスト）
+docs/issues/feat-007-multi-gpu/requirements.md:62:- 受け入れ基準: `nvidia-smi` の Processes 欄で当該 PID が GPU N にのみ紐づく。他 GPU（特に GPU0）に当該 PID が無い。これにより「`cuda:0` ハードコードでも物理 GPU0 に漏れない」ことを実証する。
+docs/issues/feat-007-multi-gpu/README.md:28:  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:34:  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+docs/issues/feat-007-multi-gpu/README.md:39:  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:83:**手順 1〜3: 3 経路の実行**（README 記載コマンドと同一。バックグラウンド＋ログ保存、`run_in_background: true` で起動し完走通知で監視。ADR-3）
+docs/issues/feat-007-multi-gpu/design.md:93:  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:99:  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:104:  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+docs/issues/feat-007-multi-gpu/design.md:126:nvidia-smi                       # Processes 欄で PID と GPU 番号の対応を見る
+docs/issues/feat-007-multi-gpu/design.md:132:1. `train.py` の Python PID（`train.log` 起動時の PID、または `pgrep -f "train.py.*bouncingballs_feat007"`）を特定する。
+docs/issues/feat-007-multi-gpu/design.md:133:2. `nvidia-smi` の Processes 欄で、その PID が **GPU N の行にのみ**現れる。
+docs/issues/feat-007-multi-gpu/design.md:134:3. GPU0 を含む他 GPU の行に当該 PID が**現れない**。
+docs/issues/feat-007-multi-gpu/design.md:214:  - GPU 確認: `nvidia-smi` 出力で当該 PID が GPU N にのみ紐づく（FR-004）
+docs/issues/feat-007-multi-gpu/design.md:247:- U2: 学習稼働中の `nvidia-smi` で当該 PID が物理 GPU N にのみ現れ、GPU0 を含む他 GPU に現れないか（FR-004 の核心）
+
+codex
+一点だけ、文書の根幹に関わる前提として「nvidia-smi の番号」と「CUDA_VISIBLE_DEVICES の番号」が必ず同じかを確認しています。ここがズレると、任意GPU選択の運用手順そのものが危険になります。
+exec
+/bin/bash -lc "env | rg '"'^CUDA_(VISIBLE_DEVICES|DEVICE_ORDER)='"' || true" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc 'nvidia-smi --query-gpu=index,pci.bus_id,uuid,name --format=csv,noheader' in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc ".venv/bin/python - <<'PY'
+import torch
+print('count', torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    p = torch.cuda.get_device_properties(i)
+    print(i, p.name, getattr(p, 'pci_bus_id', None))
+PY" in /data/sakagawa/4DGaussians
+ succeeded in 449ms:
+ exited 9 in 892ms:
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.
+
+
+ succeeded in 10376ms:
+/data/sakagawa/4DGaussians/.venv/lib/python3.10/site-packages/torch/cuda/__init__.py:497: UserWarning: Can't initialize NVML
+  warnings.warn("Can't initialize NVML")
+count 0
+
+codex
+現在のサンドボックスでは NVML/CUDA ドライバに接続できず、実GPUの列挙確認はできませんでした。既存文書の「2026-06-18 実機確認済み」という記録を前提に、文書上の設計リスクとして扱います。
+codex
+古い成果物が残っていた場合の誤判定も確認しました。終了コード 0 を必須にしているため完全な偽陽性にはなりにくいですが、固定出力先を使う以上、実装時は既存 `output/dnerf/bouncingballs_feat007/` の扱いを明示した方が安全です。
+exec
+/bin/bash -lc "sed -n '220,270p' train.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "sed -n '140,230p' train.py" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc 'rg -n "save_iterations|saving_iterations|coarse_iteration|iteration_20000|iteration_14000" docs/issues/feat-004-dnerf-train docs/issues/feat-007-multi-gpu train.py scene -S' in /data/sakagawa/4DGaussians
+ succeeded in 511ms:
+        if torch.isnan(loss).any():
+            print("loss is nan,end training, reexecv program now.")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
+        for idx in range(0, len(viewspace_point_tensor_list)):
+            viewspace_point_tensor_grad = viewspace_point_tensor_grad + viewspace_point_tensor_list[idx].grad
+        iter_end.record()
+
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_psnr_for_log = 0.4 * psnr_ + 0.6 * ema_psnr_for_log
+            total_point = gaussians._xyz.shape[0]
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}",
+                                          "psnr": f"{psnr_:.{2}f}",
+                                          "point":f"{total_point}"})
+                progress_bar.update(10)
+            if iteration == opt.iterations:
+                progress_bar.close()
+
+            # Log and save
+            timer.pause()
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, [pipe, background], stage, scene.dataset_type)
+            if (iteration in saving_iterations):
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration, stage)
+            if dataset.render_process:
+                if (iteration < 1000 and iteration % 10 == 9) \
+                    or (iteration < 3000 and iteration % 50 == 49) \
+                        or (iteration < 60000 and iteration %  100 == 99) :
+                    # breakpoint()
+                        render_training_image(scene, gaussians, [test_cams[iteration%len(test_cams)]], render, pipe, background, stage+"test", iteration,timer.get_elapsed_time(),scene.dataset_type)
+                        render_training_image(scene, gaussians, [train_cams[iteration%len(train_cams)]], render, pipe, background, stage+"train", iteration,timer.get_elapsed_time(),scene.dataset_type)
+                        # render_training_image(scene, gaussians, train_cams, render, pipe, background, stage+"train", iteration,timer.get_elapsed_time(),scene.dataset_type)
+
+                    # total_images.append(to8b(temp_image).transpose(1,2,0))
+            timer.start()
+            # Densification
+            if iteration < opt.densify_until_iter :
+                # Keep track of max radii in image-space for pruning
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
+
+                if stage == "coarse":
+                    opacity_threshold = opt.opacity_threshold_coarse
+                    densify_threshold = opt.densify_grad_threshold_coarse
+                else:    
+                    opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
+                    densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
+                if  iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<360000:
+
+ succeeded in 694ms:
+scene/__init__.py:98:            point_cloud_path = os.path.join(self.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
+docs/issues/feat-004-dnerf-train/investigation.md:92:  3. `output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物が生成される（FR-003）
+docs/issues/feat-004-dnerf-train/requirements.md:12:- **coarse ステージ**: 静的な 3D Gaussian を先に最適化する第1段階（`coarse_iterations = 3000` 回）。`scene_reconstruction(..., stage="coarse", ...)` で実行
+docs/issues/feat-004-dnerf-train/requirements.md:18:- **saving_iterations**: 成果物を保存するイテレーション集合。本構成では実際に保存が発生するのは fine ステージの 14000 と 20000 のみ（導出は design.md §1.4.3）。FR-003 の `iteration_14000` / `iteration_20000` はこれに対応する
+docs/issues/feat-004-dnerf-train/requirements.md:43:  - `output/dnerf/bouncingballs/point_cloud/iteration_20000/point_cloud.ply` が存在する
+docs/issues/feat-004-dnerf-train/requirements.md:47:- 受け入れ基準: 上記4ファイル（+iteration_20000 の3 pth）がすべて存在し、`point_cloud.ply` のサイズが 0 バイトでないこと。中間保存 `iteration_14000/` も生成されるが必須は 20000 とする
+docs/issues/feat-004-dnerf-train/requirements.md:65:- **信頼性・リカバリ方針**: NaN 発散（`train.py:220` 検出、`os.execv` で再起動）や VRAM 不足（OOM）で完走しない場合は**異常終了とみなし、自動リトライはしない**（os.execv 再起動が起きたらプロセスを停止する）。原因を `investigation.md` に記録する。失敗系の詳細は design.md §1.4.5（E1〜E6）を参照。成果物 `output/` は完走後の検証で確認し、未完走時は中間保存（あれば `iteration_14000`）の有無で進捗を切り分ける
+train.py:41:def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
+train.py:244:            if (iteration in saving_iterations):
+train.py:297:def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
+train.py:305:    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+train.py:307:                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer)
+train.py:308:    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+train.py:407:    parser.add_argument("--save_iterations", nargs="+", type=int, default=[ 14000, 20000, 30_000, 45000, 60000])
+train.py:415:    args.save_iterations.append(args.iterations)
+train.py:429:    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
+docs/issues/feat-007-multi-gpu/requirements.md:38:- 受け入れ基準: プロセスが終了コード 0 で終了し、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` が生成される（feat-004 の判定基準に準ずる）。`CUDA error: invalid device ordinal` 等の GPU 起因エラーが出ないこと。
+docs/issues/feat-004-dnerf-train/design.md:26:  ├─ scene_reconstruction(stage="coarse", train_iter=opt.coarse_iterations=3000)
+docs/issues/feat-004-dnerf-train/design.md:30:       │  saving_iterations で Scene.save()
+docs/issues/feat-004-dnerf-train/design.md:45:    ├── iteration_14000/                  … 中間保存（saving_iterations のうち到達分）
+docs/issues/feat-004-dnerf-train/design.md:50:    └── iteration_20000/                  … 最終保存（FR-003 の必須対象）
+docs/issues/feat-004-dnerf-train/design.md:57:- coarse ステージでの保存は発生しない（後述 §1.4.3 の saving_iterations 解析より、coarse の上限 3000 以下に該当する保存タイミングが無いため）
+docs/issues/feat-004-dnerf-train/design.md:107:- **処理ロジック**: `training()`（`train.py:297-310`）が `scene_reconstruction` を coarse（`train_iter=opt.coarse_iterations=3000`）→ fine（`train_iter=opt.iterations=20000`）の順に2回呼ぶ。各ステージは `for iteration in range(first_iter, final_iter+1)` のループ（`train.py:108`）
+docs/issues/feat-004-dnerf-train/design.md:109:  - `coarse_iterations = 3000`
+docs/issues/feat-004-dnerf-train/design.md:118:- **saving_iterations の確定**（`train.py:407,415` と config 上書きの相互作用を明示する）:
+docs/issues/feat-004-dnerf-train/design.md:119:  - `train.py:407` の既定: `save_iterations = [14000, 20000, 30000, 45000, 60000]`
+docs/issues/feat-004-dnerf-train/design.md:120:  - `train.py:415` `args.save_iterations.append(args.iterations)`: この時点の `args.iterations` は **argparse 既定の 30000**（config 上書きは `train.py:416-420` の後段で行われる）。よって 30000 が追加され `[14000, 20000, 30000, 45000, 60000, 30000]`
+docs/issues/feat-004-dnerf-train/design.md:121:  - `train.py:419-420` の `merge_hparams` で `args.iterations` が config 値 **20000** に更新される（save_iterations のリスト要素自体は変わらない）
+docs/issues/feat-004-dnerf-train/design.md:123:- **保存処理**: `train.py:244-246` が `if (iteration in saving_iterations): scene.save(iteration, stage)` を実行。`Scene.save`（`scene/__init__.py:96-103`）が fine では `point_cloud/iteration_{N}/` を作り、`save_ply`（`point_cloud.ply`）と `save_deformation`（`deformation.pth` / `deformation_table.pth` / `deformation_accum.pth`、`scene/gaussian_model.py:246-249`）を書き出す
+docs/issues/feat-004-dnerf-train/design.md:129:ls -la "$OUT/point_cloud/iteration_20000/"
+docs/issues/feat-004-dnerf-train/design.md:135:  "point_cloud/iteration_20000/point_cloud.ply",
+docs/issues/feat-004-dnerf-train/design.md:136:  "point_cloud/iteration_20000/deformation.pth",
+docs/issues/feat-004-dnerf-train/design.md:137:  "point_cloud/iteration_20000/deformation_table.pth",
+docs/issues/feat-004-dnerf-train/design.md:138:  "point_cloud/iteration_20000/deformation_accum.pth",
+docs/issues/feat-004-dnerf-train/design.md:239:### ADR-4: FR-003 の必須成果物は iteration_20000 とする
+docs/issues/feat-004-dnerf-train/design.md:240:fine 最終の 20000 が学習完走の証跡。中間 14000 も生成されるが、完走判定には最終保存の存在を用いる（§1.4.3 の saving_iterations 解析に基づく）。
+docs/issues/feat-004-dnerf-train/design.md:268:- **FR-003**: 成果物すべて生成。`output/dnerf/bouncingballs/point_cloud/iteration_20000/`（`point_cloud.ply` 6,888,242 bytes / `deformation.pth` 13.5MB / `deformation_table.pth` 28KB / `deformation_accum.pth` 334KB）＋ `cfg_args` 2,097 bytes。中間 `iteration_14000/` も生成。**coarse 保存は発生せず**（設計の saving_iterations 解析どおり）
+docs/issues/feat-007-multi-gpu/design.md:66:- 設定: `arguments/dnerf/bouncingballs.py`（feat-004〜006 と同一。`_base_ = dnerf_default.py`、iterations=20000 / coarse_iterations=3000）
+docs/issues/feat-007-multi-gpu/design.md:117:| 学習 | 終了コード 0。`output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply` 生成。ログに coarse(〜3000)→fine(〜20000) の進捗と最終 point 数 |
+docs/issues/feat-007-multi-gpu/design.md:118:| レンダリング | 終了コード 0。`test/ours_20000/renders/` に 20 枚の PNG、`video_rgb.mp4` 生成。ログに `point nums:` と iteration_20000 自動選択 |
+docs/issues/feat-007-multi-gpu/design.md:211:  - 学習: coarse/fine の iteration 進捗、`point nums:`、最終 `iteration_20000` 保存、exit 0
+docs/issues/feat-007-multi-gpu/design.md:212:  - レンダリング: `point nums:`、iteration_20000 自動選択、test 20 枚／video 書き出し、exit 0
+docs/issues/feat-007-multi-gpu/design.md:216:  - `ls output/dnerf/bouncingballs_feat007/point_cloud/iteration_20000/point_cloud.ply`
+docs/issues/feat-004-dnerf-train/README.md:9:- 学習成果物（`output/dnerf/bouncingballs/point_cloud/iteration_20000/`）の生成を確認することがゴール。**レンダリング・評価は feat-005 / feat-006 に委譲**
+docs/issues/feat-004-dnerf-train/README.md:25:- **Closed**（2026-05-22完了。coarse3000+fine20000=計23000反復を約10分（A100×1）で完走。`output/dnerf/bouncingballs/point_cloud/iteration_20000/` に成果物生成。ITER14000 test PSNR=39.84、最終点数27,769。実装中に Pillow 12.2.0 非互換（`scene/dataset_readers.py:287` `np.byte`→`np.uint8`）を修正（investigation.md イテレーション1）。手動テスト合格）
+docs/issues/feat-004-dnerf-train/README.md:35:2. `output/dnerf/bouncingballs/point_cloud/iteration_20000/point_cloud.ply`（非空）と `deformation.pth` / `deformation_table.pth` / `deformation_accum.pth`、および `output/dnerf/bouncingballs/cfg_args` が存在する（FR-003）
+docs/issues/feat-004-dnerf-train/README.md:42:- `design.md` — 機能設計書（実行手順・出力構成・saving_iterations 解析・エラーハンドリング・ADR）
+
+ succeeded in 940ms:
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
+
+        # Pick a random Camera
+
+        # dynerf's branch
+        if opt.dataloader and not load_in_memory:
+            try:
+                viewpoint_cams = next(loader)
+            except StopIteration:
+                print("reset dataloader into random dataloader.")
+                if not random_loader:
+                    viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=opt.batch_size,shuffle=True,num_workers=32,collate_fn=list)
+                    random_loader = True
+                loader = iter(viewpoint_stack_loader)
+
+        else:
+            idx = 0
+            viewpoint_cams = []
+
+            while idx < batch_size :    
+                    
+                viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
+                if not viewpoint_stack :
+                    viewpoint_stack =  temp_list.copy()
+                viewpoint_cams.append(viewpoint_cam)
+                idx +=1
+            if len(viewpoint_cams) == 0:
+                continue
+        # print(len(viewpoint_cams))     
+        # breakpoint()   
+        # Render
+        if (iteration - 1) == debug_from:
+            pipe.debug = True
+        images = []
+        gt_images = []
+        radii_list = []
+        visibility_filter_list = []
+        viewspace_point_tensor_list = []
+        for viewpoint_cam in viewpoint_cams:
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
+            image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            images.append(image.unsqueeze(0))
+            if scene.dataset_type!="PanopticSports":
+                gt_image = viewpoint_cam.original_image.cuda()
+            else:
+                gt_image  = viewpoint_cam['image'].cuda()
+            
+            gt_images.append(gt_image.unsqueeze(0))
+            radii_list.append(radii.unsqueeze(0))
+            visibility_filter_list.append(visibility_filter.unsqueeze(0))
+            viewspace_point_tensor_list.append(viewspace_point_tensor)
+        
+
+        radii = torch.cat(radii_list,0).max(dim=0).values
+        visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
+        image_tensor = torch.cat(images,0)
+        gt_image_tensor = torch.cat(gt_images,0)
+        # Loss
+        # breakpoint()
+        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
+
+        psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
+        # norm
+        
+
+        loss = Ll1
+        if stage == "fine" and hyper.time_smoothness_weight != 0:
+            # tv_loss = 0
+            tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
+            loss += tv_loss
+        if opt.lambda_dssim != 0:
+            ssim_loss = ssim(image_tensor,gt_image_tensor)
+            loss += opt.lambda_dssim * (1.0-ssim_loss)
+        # if opt.lambda_lpips !=0:
+        #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
+        #     loss += opt.lambda_lpips * lpipsloss
+        
+        loss.backward()
+        if torch.isnan(loss).any():
+            print("loss is nan,end training, reexecv program now.")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
+        for idx in range(0, len(viewspace_point_tensor_list)):
+            viewspace_point_tensor_grad = viewspace_point_tensor_grad + viewspace_point_tensor_list[idx].grad
+        iter_end.record()
+
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+
+exec
+/bin/bash -lc "nl -ba docs/issues/feat-007-multi-gpu/requirements.md | sed -n '20,24p;31,36p;64,73p'" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "nl -ba train.py | sed -n '420,430p'" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "nl -ba docs/issues/feat-007-multi-gpu/design.md | sed -n '83,105p;140,150p;244,250p'" in /data/sakagawa/4DGaussians
+exec
+/bin/bash -lc "nl -ba gaussian_renderer/network_gui.py | sed -n '15,35p'" in /data/sakagawa/4DGaussians
+ succeeded in 574ms:
+    20	
+    21	- **物理 GPU 番号**: `nvidia-smi` が表示する GPU の通し番号（本マシンは 0〜6）。`CUDA_VISIBLE_DEVICES=N` の N に与える値。
+    22	- **論理デバイス**: PyTorch が見る GPU。`CUDA_VISIBLE_DEVICES=N` を設定すると、物理 GPU N が論理デバイス `cuda:0`（先頭）として見える。本体コードの `cuda:0` / `cuda` はこの論理先頭を指す。
+    23	- **3 経路**: 学習（`train.py`）・レンダリング（`render.py`）・評価（`metrics.py`）の 3 つの実行経路。本プロジェクトの動作確認の単位。
+    24	- **任意 GPU 選択（マルチGPU運用）**: 複数 GPU の中から空いている 1 枚を実行ごとに選んで使う運用。**1 プロセス = 1 GPU**。複数 GPU を 1 ジョブで同時使用する分散学習とは異なる（本案件のスコープ外）。
+    31	### FR-001: 任意 GPU（N≠0）での学習完走
+    32	
+    33	- `CUDA_VISIBLE_DEVICES=N`（N は 0 以外の空き物理 GPU）を付けて `train.py` を D-NeRF `bouncingballs` で実行し、クラッシュせず完走する。
+    34	- 入力: 下記コマンド（実行は `.venv/bin/python` 経由、バックグラウンド＋ログ保存）
+    35	  - `CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py -s data/dnerf/bouncingballs --port 6107 --expname "dnerf/bouncingballs_feat007" --configs arguments/dnerf/bouncingballs.py`
+    36	- 出力: 標準出力に coarse/fine の学習進捗、`output/dnerf/bouncingballs_feat007/point_cloud/iteration_{14000,20000}/point_cloud.ply` ほか成果物
+    64	### FR-005: マルチGPU運用ルールの文書化
+    65	
+    66	- 共用サーバーでの任意 GPU 運用手順を `CLAUDE.md` の新節「マルチGPU運用ルール」と本案件 `design.md` に明文化する。
+    67	- 記載必須項目（design §1.4.5 と一致させる）:
+    68	  1. 実行前に `nvidia-smi` で空き GPU を確認し N（≠0、空き 1 枚）を選ぶ
+    69	  2. `CUDA_VISIBLE_DEVICES=N` を付けて train/render/metrics を実行する（同一ジョブの 3 経路は同一 N を使う）
+    70	  3. `cuda:0` / `cuda` は論理デバイス先頭＝マスク後の物理 GPU N を指すため**コード変更は不要**
+    71	  4. 分散学習（複数 GPU 同時使用）は本体非対応＝**1 プロセス 1 GPU**
+    72	  5. 学習を**並行実行**する場合は `--port`（既定 6009）を実行ごとに変える（network_gui ポート衝突回避）。render/metrics はポート不使用
+    73	- 優先度: Must
+
+ succeeded in 808ms:
+    83	**手順 1〜3: 3 経路の実行**（README 記載コマンドと同一。バックグラウンド＋ログ保存、`run_in_background: true` で起動し完走通知で監視。ADR-3）
+    84	
+    85	```bash
+    86	mkdir -p /data/sakagawa/tmp/feat007-multi-gpu
+    87	
+    88	# 1) 学習（--port は 6107 を既定とする。理由は §1.4.4 E4 / ADR-4）
+    89	CUDA_VISIBLE_DEVICES=N .venv/bin/python train.py \
+    90	  -s data/dnerf/bouncingballs --port 6107 \
+    91	  --expname "dnerf/bouncingballs_feat007" \
+    92	  --configs arguments/dnerf/bouncingballs.py \
+    93	  > /data/sakagawa/tmp/feat007-multi-gpu/train.log 2>&1
+    94	
+    95	# 2) レンダリング
+    96	CUDA_VISIBLE_DEVICES=N .venv/bin/python render.py \
+    97	  --model_path "output/dnerf/bouncingballs_feat007/" --skip_train \
+    98	  --configs arguments/dnerf/bouncingballs.py \
+    99	  > /data/sakagawa/tmp/feat007-multi-gpu/render.log 2>&1
+   100	
+   101	# 3) 評価
+   102	CUDA_VISIBLE_DEVICES=N .venv/bin/python metrics.py \
+   103	  --model_paths output/dnerf/bouncingballs_feat007/ \
+   104	  > /data/sakagawa/tmp/feat007-multi-gpu/metrics.log 2>&1
+   105	```
+   140	### 1.4.4 エラーハンドリングと境界条件
+   141	
+   142	| ID | 事象 | 検出 | 設計上の扱い |
+   143	|----|------|------|--------------|
+   144	| E1 | 指定 GPU N が他者使用中で VRAM 不足（OOM） | 学習/レンダリングが `CUDA out of memory` で異常終了 | 実行前 `nvidia-smi`（§1.4.1 手順 0）で空きを確認して回避。発生時は別の空き N で再実行（自動リトライはしない）。`investigation.md` に記録 |
+   145	| E2 | 存在しない GPU 番号 N を指定（例 N=7） | 起動時 `CUDA error: invalid device ordinal` | N は 0〜6 の範囲で指定。誤指定時はコマンド修正のうえ再実行 |
+   146	| E3 | `CUDA_VISIBLE_DEVICES` を付け忘れる | 既定で論理 `cuda:0`＝物理 GPU0 を使い、GPU0 が混雑なら OOM | 運用ルール（§1.4.5）で必須化。3 経路すべてに付ける |
+   147	| E4 | 学習の並行実行でポート衝突 | 2 つ目の `train.py` が `network_gui.init`（既定 6009）で bind 失敗しうる | 学習を並行起動する場合は `--port` を実行ごとに変える（公式 `scripts/*.sh` と同方針）。本案件は単発実行で 6107 を使う。render/metrics はポート不使用のため無関係。**network_gui の bind 失敗時の正確な挙動は U3 で実地確認** |
+   148	| E5 | 学習成果物の出力先が既存と衝突 | `output/dnerf/bouncingballs/` を上書き | `--expname dnerf/bouncingballs_feat007` で別パスに分離（ADR-2）。誤って同一 expname を使わない |
+   149	| E6 | Pillow/numpy 型互換（feat-004 の前例）の再発 | 学習/評価で `TypeError` | feat-004 で `dataset_readers.py:287` を `np.uint8` 修正済み（既適用）。GPU 変更と無関係。再発時はコード変更せず中断・記録 |
+   150	
+   244	## 未検証事項（実装時に実地検証）
+   245	
+   246	- U1: `CUDA_VISIBLE_DEVICES=N`（N≠0）で 3 経路がいずれも exit 0 で完走し、成果物が生成されるか
+   247	- U2: 学習稼働中の `nvidia-smi` で当該 PID が物理 GPU N にのみ現れ、GPU0 を含む他 GPU に現れないか（FR-004 の核心）
+   248	- U3: `--port 6107` での network_gui 初期化が正常か。並行実行時のポート衝突挙動（bind 失敗が学習をクラッシュさせるか握りつぶすか）の確認（参考）
+   249	- U4: 評価指標が feat-006 実測（PSNR≈40.68 / SSIM≈0.994 等）と整合するか（GPU 変更で数値が変わらないこと）
+   250	- U5: 本体 `*.py` に差分が出ていないこと（FR-006、`git status`）
+
+ succeeded in 898ms:
+   420	        args = merge_hparams(args, config)
+   421	    print("Optimizing " + args.model_path)
+   422	
+   423	    # Initialize system state (RNG)
+   424	    safe_state(args.quiet)
+   425	
+   426	    # Start GUI server, configure and run training
+   427	    network_gui.init(args.ip, args.port)
+   428	    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+   429	    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
+   430	
+
+ succeeded in 895ms:
+    15	import json
+    16	from scene.cameras import MiniCam
+    17	
+    18	host = "127.0.0.1"
+    19	port = 6009
+    20	
+    21	conn = None
+    22	addr = None
+    23	
+    24	listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    25	
+    26	def init(wish_host, wish_port):
+    27	    global host, port, listener
+    28	    host = wish_host
+    29	    port = wish_port
+    30	    listener.bind((host, port))
+    31	    listener.listen()
+    32	    listener.settimeout(0)
+    33	
+    34	def try_connect():
+    35	    global conn, addr, listener
+
+exec
+/bin/bash -lc "nl -ba docs/issues/feat-007-multi-gpu/design.md | sed -n '121,136p'" in /data/sakagawa/4DGaussians
+ succeeded in 922ms:
+   121	### 1.4.3 FR-004: 指定物理 GPU への負荷限定の確認
+   122	
+   123	学習（手順 1）が稼働中に別シェルで以下を実行する:
+   124	
+   125	```bash
+   126	nvidia-smi                       # Processes 欄で PID と GPU 番号の対応を見る
+   127	# 補助: 当該プロセスの GPU 占有のみ抽出
+   128	nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv
+   129	```
+   130	
+   131	**確認内容**:
+   132	1. `train.py` の Python PID（`train.log` 起動時の PID、または `pgrep -f "train.py.*bouncingballs_feat007"`）を特定する。
+   133	2. `nvidia-smi` の Processes 欄で、その PID が **GPU N の行にのみ**現れる。
+   134	3. GPU0 を含む他 GPU の行に当該 PID が**現れない**。
+   135	4. GPU N の `Memory-Usage` と `GPU-Util` が学習負荷で上昇している。
+   136	
+
+codex
+**レビュー結果**
+
+**高**
+- [requirements.md](/data/sakagawa/4DGaussians/docs/issues/feat-007-multi-gpu/requirements.md:21) が `nvidia-smi` の GPU index をそのまま `CUDA_VISIBLE_DEVICES=N` に使う前提になっているが、CUDA の列挙順と `nvidia-smi` の表示順が常に一致する保証が文書化されていない。ここがズレると、空き GPU を選んだつもりで別 GPU に乗り、FR-004 の核心が破綻する。  
+  **修正提案**: 全コマンドと運用ルールに `CUDA_DEVICE_ORDER=PCI_BUS_ID` を追加する。あわせて `nvidia-smi --query-gpu=index,pci.bus_id,uuid` の記録と、学習中の PID が選択 GPU index に紐づく確認を受け入れ基準に含める。
+
+**中**
+- [design.md](/data/sakagawa/4DGaussians/docs/issues/feat-007-multi-gpu/design.md:83) は「バックグラウンド＋ログ保存」と書く一方、実行例には `&` や PID 保存がなく、[design.md](/data/sakagawa/4DGaussians/docs/issues/feat-007-multi-gpu/design.md:132) の「train.log 起動時の PID」も実際には記録されない。`pgrep` 代替は同一 expname の残プロセスがあると誤認し得るため、FR-004 の証跡が曖昧になる。  
+  **修正提案**: 学習起動時に `$!` を `/data/sakagawa/tmp/feat007-multi-gpu/train.pid` に保存し、`nvidia-smi` 出力と `wait` の終了コードもログ化する手順に差し替える。
+
+- `--port 6107` 固定のまま、ポート使用中の扱いが未確定。実コードでは [network_gui.py](/data/sakagawa/4DGaussians/gaussian_renderer/network_gui.py:30) の `bind()` 失敗が捕捉されず、[train.py](/data/sakagawa/4DGaussians/train.py:427) で学習開始前にクラッシュする。共有サーバーでは単発実行でも他者と衝突し得る。  
+  **修正提案**: 実行前に `6107` の空きを確認する手順を追加するか、ポート `P` を実行時に選ぶ変数として定義し、空き確認後に `--port P` で起動する設計に変更する。
+
+**低**
+- 致命的な指摘のみという依頼のため、低重要度の指摘はありません。
+tokens used
+106,284
+**レビュー結果**
+
+**高**
+- [requirements.md](/data/sakagawa/4DGaussians/docs/issues/feat-007-multi-gpu/requirements.md:21) が `nvidia-smi` の GPU index をそのまま `CUDA_VISIBLE_DEVICES=N` に使う前提になっているが、CUDA の列挙順と `nvidia-smi` の表示順が常に一致する保証が文書化されていない。ここがズレると、空き GPU を選んだつもりで別 GPU に乗り、FR-004 の核心が破綻する。  
+  **修正提案**: 全コマンドと運用ルールに `CUDA_DEVICE_ORDER=PCI_BUS_ID` を追加する。あわせて `nvidia-smi --query-gpu=index,pci.bus_id,uuid` の記録と、学習中の PID が選択 GPU index に紐づく確認を受け入れ基準に含める。
+
+**中**
+- [design.md](/data/sakagawa/4DGaussians/docs/issues/feat-007-multi-gpu/design.md:83) は「バックグラウンド＋ログ保存」と書く一方、実行例には `&` や PID 保存がなく、[design.md](/data/sakagawa/4DGaussians/docs/issues/feat-007-multi-gpu/design.md:132) の「train.log 起動時の PID」も実際には記録されない。`pgrep` 代替は同一 expname の残プロセスがあると誤認し得るため、FR-004 の証跡が曖昧になる。  
+  **修正提案**: 学習起動時に `$!` を `/data/sakagawa/tmp/feat007-multi-gpu/train.pid` に保存し、`nvidia-smi` 出力と `wait` の終了コードもログ化する手順に差し替える。
+
+- `--port 6107` 固定のまま、ポート使用中の扱いが未確定。実コードでは [network_gui.py](/data/sakagawa/4DGaussians/gaussian_renderer/network_gui.py:30) の `bind()` 失敗が捕捉されず、[train.py](/data/sakagawa/4DGaussians/train.py:427) で学習開始前にクラッシュする。共有サーバーでは単発実行でも他者と衝突し得る。  
+  **修正提案**: 実行前に `6107` の空きを確認する手順を追加するか、ポート `P` を実行時に選ぶ変数として定義し、空き確認後に `--port P` で起動する設計に変更する。
+
+**低**
+- 致命的な指摘のみという依頼のため、低重要度の指摘はありません。
