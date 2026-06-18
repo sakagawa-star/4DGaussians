@@ -13,3 +13,6 @@ submodules/
 # Claude Code のローカル作業ファイル（handover・ローカル設定）。公開フォークに出さない
 .claude/
 .venv/
+
+# Codex レビューの過程ログ（result.md のみ git 管理。full.log はローカルのみ）
+docs/issues/*/reviews/*.full.log
