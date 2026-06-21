@@ -61,7 +61,8 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 | lpips | — | 知覚的画質評価（学習・評価） | |
 | plyfile | — | 点群PLY入出力 | |
 | pytorch_msssim | — | MS-SSIM損失・評価 | |
-| open3d | — | 点群処理・可視化 | |
+| open3d | == 0.19.0（feat-001 最新解決） | 点群処理・可視化（`scripts/downsample_point.py`） | feat-008（2026-06-21）で**既存 0.19.0 を維持**（追加導入せず）。numpy 1.23.5 と ABI 互換 |
+| scikit-image | == 0.22.0（feat-008で追加） | 実シーン前処理 LLFF（`multipleviewprogress.sh` の `imgs2poses`）が依存 | **feat-008（2026-06-21）で新規導入**。`uv pip install "numpy==1.23.5" "scikit-image==0.22.0"`（追加的・numpy アンカー）。numpy 1.23.5 維持で torch/open3d 非破壊を確認（追加: lazy-loader/networkx/tifffile） |
 | imageio[ffmpeg] | — | 動画入出力 | |
 | matplotlib | — | 可視化 | |
 | argparse | （導入しない） | 引数解析（標準ライブラリと重複） | PyPI版（最終リリース2010年）は標準ライブラリをシャドーイングする恐れがあるため**feat-001で導入対象から除外**。Python 3.10標準ライブラリを使用（design ADR-6） |
@@ -89,7 +90,17 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 
 | ツール | 状態 | 用途 |
 |--------|------|------|
-| COLMAP | **未インストール** | 実シーン（HyperNeRF/DyNeRF/カスタム）のSfM前処理。D-NeRF合成シーンでは不要 |
+| COLMAP | **vcpkg ソースビルド導入済み（feat-008, 2026-06-21）** | 実シーン（HyperNeRF/DyNeRF/multipleview）のSfM/MVS前処理。D-NeRF合成シーンでは不要 |
+
+### COLMAP（feat-008, 2026-06-21）
+
+- **導入方式**: vcpkg（Microsoft 製ソースパッケージマネージャ）で依存込みソースビルド。**COLMAP 公式は Linux バイナリ（AppImage 含む）を一切配布していない**ため（GitHub Releases 3.3〜4.0.4 全確認）、conda 非依存・sudo 原則不要のソースビルドを採用。
+- **版・フィーチャ**: `colmap[core,cuda]:x64-linux@3.12.6#1`。`core`=default feature（`gui`=Qt5 GUI）を除外（ヘッドレス・Qt5 回避）、`cuda`=CUDA 有効（GPU SIFT・dense）。**CGAL は省略**（4DG は mesher 不使用。必要時のみ `[core,cuda,cgal]` 再ビルド）。
+- **ビルド CUDA**: **11.6**（`/usr/local/cuda-11.6`、第一候補）。driver 565.57.01 完全対応・torch cu116 実証済み。12.8 は代替（driver 565 では minor version compatibility 依存）。A100=sm_80。
+- **Fortran 依存（重要）**: COLMAP は SuiteSparse(CHOLMOD)/Ceres 経由で BLAS/LAPACK 必須。vcpkg の Linux LAPACK 提供 `lapack-reference` が Reference LAPACK を Fortran ソースからビルドするため **gfortran が必須**。本機未導入だったため **`sudo apt-get install gfortran`（GNU Fortran 11.4.0、GPUサーバー管理者承認 2026-06-21）** で導入。これが無いとビルドが `Unable to find a Fortran compiler` で失敗する。
+- **配置**: vcpkg=`/data/sakagawa/opt/vcpkg`（installed 約 3.7GB、十数 GB に達し得るため /data 配置）。バイナリ=`installed/x64-linux/tools/colmap/colmap`。**PATH ラッパー=`~/.local/bin/colmap`**（`LD_LIBRARY_PATH` に installed/lib を前置して実体を exec）。
+- **ヘッドレス運用**: 本機は DISPLAY 未設定。**GPU SIFT（feature_extractor/exhaustive_matcher の `--use_gpu 1`）は CUDA 有効ビルドによりヘッドレスでも動作**（feat-008 で南棟データ18枚を全登録・実証）。失敗時は `--use_gpu 0`（CPU）にフォールバック（feature/matcher は独立判定）。dense（patch_match_stereo）は CUDA 直で OpenGL 不要。GPU 選択は `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=N`（CLAUDE.md マルチGPU運用）。
+- **再現情報**: ビルドスクリプト・ログ・`build-info.txt` は scratch（`/data/sakagawa/tmp/feat008-colmap/`、非コミット）。vcpkg commit `36393d1`。手順の正本は `docs/issues/feat-008-colmap/design.md`。
 
 ---
 

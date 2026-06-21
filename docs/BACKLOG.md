@@ -104,7 +104,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Open** |
+| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Closed**（2026-06-21、手動テスト合格）。導入方式=**vcpkg ソースビルド**〔`colmap[core,cuda]:x64-linux@3.12.6`、GUI除外・CUDA11.6有効〕。ビルドに gfortran 必須が判明し `sudo apt`〔管理者承認〕で導入。FR-001〜006 自己検証＋ユーザー手動テストとも合格: `colmap -h` 動作、`~/.local/bin/colmap` ラッパー、scikit-image 0.22.0 導入（open3d 0.19.0 維持）、south-building 18枚で疎再構成（登録18/18・3D点≈3755）・dense（fused.ply 約122万点）完走、GPU SIFT ヘッドレス動作実証。経緯・ADR・investigation は `docs/issues/feat-008-colmap/`） |
 
 **判定基準（案）**: `colmap --help`（または相当）が通る。`scripts/downsample_point.py`（open3d）が import エラーなく動く。小規模データでCOLMAP（feature_extractor〜mapper）が完走する。**本マシンはcolmap未インストール（CLAUDE.md実行環境表）のため、導入方法〔ソースビルド or 配布バイナリ〕の調査・選定が案件の主眼**
 

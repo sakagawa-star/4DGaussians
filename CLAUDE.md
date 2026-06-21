@@ -37,7 +37,8 @@
 | システムPython | 3.10.12 |
 | パッケージ管理 | uv 0.11.6（インストール済み） |
 | conda | **未インストール**（公式手順のconda部分はuvで代替する） |
-| colmap | **未インストール**（実シーン用。D-NeRF合成シーンでは不要） |
+| colmap | **vcpkg ソースビルド導入済み（feat-008, 2026-06-21）**。`colmap[core,cuda]:x64-linux@3.12.6`（CUDA有効・GUI除外）。PATH=`~/.local/bin/colmap`（→`/data/sakagawa/opt/vcpkg/installed/x64-linux/tools/colmap/colmap`）。ビルドに gfortran 必須（`sudo apt`、管理者承認）。ヘッドレスで GPU SIFT 動作実証。詳細は `docs/TECH_STACK.md`「COLMAP」節・`docs/issues/feat-008-colmap/` |
+| gfortran | **導入済み（feat-008, 2026-06-21、`sudo apt`、管理者承認）**。GNU Fortran 11.4.0。COLMAP 依存 `lapack-reference`（Reference LAPACK）のビルドに必須 |
 | リポジトリ | `/data/sakagawa/4DGaussians`（git clone済み） |
 
 ## マルチGPU運用ルール（任意GPU選択）
