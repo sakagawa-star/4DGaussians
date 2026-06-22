@@ -70,7 +70,7 @@
 学習・評価には外部データセットが必要（`data/` 配下、`.gitignore` 管理外を想定）。
 
 - **D-NeRF（合成シーン）**: 最初の動作確認に使用。**取得済み（feat-003, 2026-05-22）**。Dropbox の `data.zip`（246MB）を展開し `data/dnerf/{scene}/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）を配置。各シーンに `transforms_{train,val,test}.json` と `train/`・`val/`・`test/`（png）。本体は train/test のみ読込。`data/` は `.gitignore` 管理外（git未追跡。再取得手順は `docs/issues/feat-003-dnerf-data/design.md` 参照）
-- **HyperNeRF（実シーン）**: colmap 前処理が必要
+- **HyperNeRF（実シーン・単眼）**: **broom2 で学習〜評価 動作確認済み（feat-009, 2026-06-21）**。HyperNeRF v0.1 リリース `vrig_broom.zip`（1.5GB）を `data/hypernerf/virg/` へ展開（zipトップが `broom2/` のため `data/hypernerf/virg/broom2/` ができる。画像394枚・`rgb/2x` 必須）。点群は Google Drive の事前生成COLMAP点群（file id `1fUHiSgimVjVQZ2OOzTFtz02E9EqCoWr5`）を **gdown** でDLし `points3D_downsample2.ply`（38,569点）を配置（**COLMAP 実走不要**）。学習は `--configs arguments/hypernerf/broom2.py`、`render.py --skip_train`→`metrics.py` で PSNR 22.08/MS-SSIM 0.691（論文 22.0/0.70）。視覚的裏付けに chicken（`vrig_chicken.zip`→`data/hypernerf/virg/vrig-chicken/`、点群は事前生成zip内 `virg-chickchicken/`、config `chicken.py`）も実施し PSNR 28.65/MS-SSIM 0.930（論文 28.7/0.93、目視で鮮明と確認）。**train/render は `MPLBACKEND=Agg MPLCONFIGDIR=... TMPDIR=...` を付与**（読込時 `plot_camera_orientations` が matplotlib で `output.png` を CWD に savefig するため）。詳細は `docs/issues/feat-009-hypernerf/`。`data/` は `.gitignore` 管理外（git未追跡）
 - **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要
 
 ## オリジナルコードの変更点

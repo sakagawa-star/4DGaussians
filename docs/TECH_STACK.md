@@ -63,6 +63,7 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 | pytorch_msssim | — | MS-SSIM損失・評価 | |
 | open3d | == 0.19.0（feat-001 最新解決） | 点群処理・可視化（`scripts/downsample_point.py`） | feat-008（2026-06-21）で**既存 0.19.0 を維持**（追加導入せず）。numpy 1.23.5 と ABI 互換 |
 | scikit-image | == 0.22.0（feat-008で追加） | 実シーン前処理 LLFF（`multipleviewprogress.sh` の `imgs2poses`）が依存 | **feat-008（2026-06-21）で新規導入**。`uv pip install "numpy==1.23.5" "scikit-image==0.22.0"`（追加的・numpy アンカー）。numpy 1.23.5 維持で torch/open3d 非破壊を確認（追加: lazy-loader/networkx/tifffile） |
+| gdown | == 6.1.0（feat-009で追加） | Google Drive からのデータ取得（HyperNeRF 事前生成COLMAP点群 `points3D_downsample2.ply` のDL）。大容量ファイルの確認トークン（virus scan 警告）を自動処理 | **feat-009（2026-06-21）で新規導入**。`uv pip install gdown`（追加的）。numpy 1.23.5・torch 非破壊を確認（追加: beautifulsoup4/soupsieve/pysocks/filelock） |
 | imageio[ffmpeg] | — | 動画入出力 | |
 | matplotlib | — | 可視化 | |
 | argparse | （導入しない） | 引数解析（標準ライブラリと重複） | PyPI版（最終リリース2010年）は標準ライブラリをシャドーイングする恐れがあるため**feat-001で導入対象から除外**。Python 3.10標準ライブラリを使用（design ADR-6） |
@@ -109,10 +110,17 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 | データセット | 種別 | 取得元 | 前処理 |
 |-------------|------|--------|--------|
 | D-NeRF | 合成シーン | Dropbox（README参照） | 不要 |
-| HyperNeRF | 実シーン | HyperNeRF releases | COLMAP（事前生成点群あり） |
+| HyperNeRF | 実シーン（単眼） | HyperNeRF releases（`vrig_*.zip`） | COLMAP。**事前生成点群あり**（feat-009 で broom2 を採用） |
 | Plenoptic / DyNeRF | 実シーン（多視点動画） | Neural 3D Video公式 | フレーム抽出 + COLMAP |
 
 `data/` 配下に配置する（`.gitignore` 管理外を想定）。
+
+### HyperNeRF（feat-009, 2026-06-21、broom2 で学習〜評価 動作確認済み）
+
+- **データ取得**: HyperNeRF v0.1 リリース `https://github.com/google/hypernerf/releases/download/v0.1/vrig_broom.zip`（1.5GB）を取得・展開。zip のトップ階層が `broom2/` のため `data/hypernerf/virg/` へ展開すると `data/hypernerf/virg/broom2/`（`dataset.json`/`metadata.json`/`scene.json`/`camera/`/`rgb/2x/` 等、画像394枚）が直接できる。
+- **点群**: 4DGS 作者の事前生成COLMAP点群を Google Drive（file id `1fUHiSgimVjVQZ2OOzTFtz02E9EqCoWr5`、README 記載）から **gdown** でDL（zip 37.9MB）。内部 `hypernerf/virg/broom2/points3D_downsample2.ply`（38,569点）を `data/hypernerf/virg/broom2/` へ配置。**COLMAP 実走は不要**（feat-008 で COLMAP は検証済み）。
+- **学習〜評価**: `train.py`（config `arguments/hypernerf/broom2.py`、coarse3000+fine14000、約17分@A100×1）→ `render.py --skip_train` → `metrics.py`。**PSNR 22.08 / MS-SSIM 0.691**（論文 broom 22.0/0.70 とほぼ一致）。
+- **ヘッドレス注意**: HyperNeRF 読み込み時に `scene/dataset_readers.py:plot_camera_orientations` が matplotlib で `output.png` を CWD に savefig するため、train/render は `MPLBACKEND=Agg` と書込可能な `MPLCONFIGDIR`/`TMPDIR` を固定する（metrics は不要）。詳細は `docs/issues/feat-009-hypernerf/`。
 
 ---
 

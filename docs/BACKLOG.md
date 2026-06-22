@@ -112,7 +112,7 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-009 | HyperNeRF動作確認 | 実シーン・単眼の1シーン（例: broom2）で、前処理（`colmap.sh ... hypernerf`＋`downsample_point.py`、または事前生成COLMAP点群のDL）→学習→レンダリング→評価を一通り動かす | feat-008 | **Open** |
+| feat-009 | HyperNeRF動作確認 | 実シーン・単眼の1シーン（例: broom2）で、前処理（`colmap.sh ... hypernerf`＋`downsample_point.py`、または事前生成COLMAP点群のDL）→学習→レンダリング→評価を一通り動かす | feat-008 | **Closed**（2026-06-22、手動テスト合格）。方式=事前生成点群DL（gdown 新規導入）＋broom2。FR-001〜006 全達成: vrig_broom DL→学習17分→render test197枚→metrics **PSNR 22.08/MS-SSIM 0.691**〔論文 22.0/0.70 と一致〕。視覚的裏付けに chicken も実施（**PSNR 28.65/MS-SSIM 0.930**〔論文 28.7/0.93〕、目視で鮮明と確認）。本体コード変更ゼロ。詳細は `docs/issues/feat-009-hypernerf/` |
 
 **判定基準（案）**: `data/hypernerf/.../` 配下を整備し、`train.py`→`render.py`→`metrics.py` が完走する。データ形式は scene.json/metadata.json/dataset.json/rgb/camera 構造（`scene/dataset_readers.py:readHyperDataInfos`、判定は dataset.json の存在）
 
