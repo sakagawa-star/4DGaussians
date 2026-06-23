@@ -37,7 +37,7 @@
 | システムPython | 3.10.12 |
 | パッケージ管理 | uv 0.11.6（インストール済み） |
 | conda | **未インストール**（公式手順のconda部分はuvで代替する） |
-| colmap | **vcpkg ソースビルド導入済み（feat-008, 2026-06-21）**。`colmap[core,cuda]:x64-linux@3.12.6`（CUDA有効・GUI除外）。PATH=`~/.local/bin/colmap`（→`/data/sakagawa/opt/vcpkg/installed/x64-linux/tools/colmap/colmap`）。ビルドに gfortran 必須（`sudo apt`、管理者承認）。ヘッドレスで GPU SIFT 動作実証。詳細は `docs/TECH_STACK.md`「COLMAP」節・`docs/issues/feat-008-colmap/` |
+| colmap | **vcpkg ソースビルド導入済み（feat-008, 2026-06-21）**。`colmap[core,cuda]:x64-linux@3.12.6`（CUDA有効・GUI除外）。PATH=`~/.local/bin/colmap`（→`/data/sakagawa/opt/vcpkg/installed/x64-linux/tools/colmap/colmap`）。ビルドに gfortran 必須（`sudo apt`、管理者承認）。ヘッドレスで GPU SIFT 動作実証。詳細は `docs/TECH_STACK.md`「COLMAP」節・`docs/issues/feat-008-colmap/`。**＋3.11.1 を別 prefix 併設（feat-011, 2026-06-23、rig 非互換回避）**: `/data/sakagawa/opt/colmap-3.11/`（ラッパー `bin/colmap`）。DyNeRF/multipleview の `colmap.sh`/`multipleviewprogress.sh` 実走時のみ使用（後述「COLMAP の使い分け」節・`docs/issues/feat-011-colmap-3.11/`） |
 | gfortran | **導入済み（feat-008, 2026-06-21、`sudo apt`、管理者承認）**。GNU Fortran 11.4.0。COLMAP 依存 `lapack-reference`（Reference LAPACK）のビルドに必須 |
 | リポジトリ | `/data/sakagawa/4DGaussians`（git clone済み） |
 
@@ -51,6 +51,22 @@
 3. コード内の `cuda:0` / `cuda`（`utils/general_utils.py:139`、`metrics.py:116-117`、`render.py`）は **マスク後の論理デバイス先頭**を指すため物理 GPU N に乗る。**コード変更は不要**。
 4. **分散学習（複数 GPU 同時使用）は本体非対応**。1 ジョブで複数 GPU は使えない。
 5. **学習はポートを使う**（`--port`、既定 6009）。実行前に `ss -ltn | grep :<port>` で空きを確認する。使用中だと `network_gui` の `bind()` が例外処理されておらず**起動時にクラッシュ**する。並行実行時もポートを変える。render/metrics はポートを使わない。
+
+## COLMAP の使い分け（3.12.6 / 3.11.1）
+
+本マシンには COLMAP が2系統入っている（feat-008: 3.12.6、feat-011: 3.11.1）。用途で使い分ける。4DGS 本体（`colmap.sh` 含む）は非改変。
+
+1. **既定は 3.12.6**（`~/.local/bin/colmap`、`command -v colmap` がこれを指す）。静的シーンや `convert.py` の mapper 経路で使う。
+2. **DyNeRF/multipleview の `colmap.sh ... llff` / `multipleviewprogress.sh` は 3.11.1 を使う**。3.12.6 は単一カメラ共有 sparse + `point_triangulator` で rig 非互換（`Check failed: existing_frame.RigId()==frame.RigId()`）クラッシュするため。実行は **PATH 前置**:
+   ```bash
+   PATH="/data/sakagawa/opt/colmap-3.11/bin:/data/sakagawa/4DGaussians/.venv/bin:$PATH" \
+     bash -e colmap.sh <workdir> llff
+   ```
+   - 3.11.1 は別 prefix（`/data/sakagawa/opt/colmap-3.11/`）に分離され、PATH 前置を外せば既定 3.12.6 のまま（既存ワークフロー非破壊）。
+   - GPU は `colmap.sh:5` のハードコード（`CUDA_VISIBLE_DEVICES=0`）に従う。**GPU0 使用中なら空くまで待つ**（任意 GPU 選択は colmap.sh:5 引数化＝feat-012 スコープ）。
+   - `feature_extractor` は CPU SIFT（`colmap.sh:15` の `estimate_affine_shape`/`domain_size_pooling` 指定のため自動フォールバック、正常）。dense（`patch_match_stereo`）は GPU0。
+   - `point_triangulator --clear_points 1` は filename で image_id を database に揃える（`sparse_custom` と `database.db` の image_id 数値不一致は正常）。
+   - 詳細は `docs/TECH_STACK.md`「COLMAP 3.11.1 併設」節・`docs/issues/feat-011-colmap-3.11/`。
 
 ## 技術スタック
 
@@ -71,7 +87,7 @@
 
 - **D-NeRF（合成シーン）**: 最初の動作確認に使用。**取得済み（feat-003, 2026-05-22）**。Dropbox の `data.zip`（246MB）を展開し `data/dnerf/{scene}/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）を配置。各シーンに `transforms_{train,val,test}.json` と `train/`・`val/`・`test/`（png）。本体は train/test のみ読込。`data/` は `.gitignore` 管理外（git未追跡。再取得手順は `docs/issues/feat-003-dnerf-data/design.md` 参照）
 - **HyperNeRF（実シーン・単眼）**: **broom2 で学習〜評価 動作確認済み（feat-009, 2026-06-21）**。HyperNeRF v0.1 リリース `vrig_broom.zip`（1.5GB）を `data/hypernerf/virg/` へ展開（zipトップが `broom2/` のため `data/hypernerf/virg/broom2/` ができる。画像394枚・`rgb/2x` 必須）。点群は Google Drive の事前生成COLMAP点群（file id `1fUHiSgimVjVQZ2OOzTFtz02E9EqCoWr5`）を **gdown** でDLし `points3D_downsample2.ply`（38,569点）を配置（**COLMAP 実走不要**）。学習は `--configs arguments/hypernerf/broom2.py`、`render.py --skip_train`→`metrics.py` で PSNR 22.08/MS-SSIM 0.691（論文 22.0/0.70）。視覚的裏付けに chicken（`vrig_chicken.zip`→`data/hypernerf/virg/vrig-chicken/`、点群は事前生成zip内 `virg-chickchicken/`、config `chicken.py`）も実施し PSNR 28.65/MS-SSIM 0.930（論文 28.7/0.93、目視で鮮明と確認）。**train/render は `MPLBACKEND=Agg MPLCONFIGDIR=... TMPDIR=...` を付与**（読込時 `plot_camera_orientations` が matplotlib で `output.png` を CWD に savefig するため）。詳細は `docs/issues/feat-009-hypernerf/`。`data/` は `.gitignore` 管理外（git未追跡）
-- **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要
+- **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要（**COLMAP は feat-011 で併設した 3.11.1 を使う**。3.12.6 は `colmap.sh ... llff` の `point_triangulator` で rig 非互換クラッシュ。使い分けは「COLMAP の使い分け」節参照）。cut_roasted_beef は前処理（フレーム抽出・`colmap.sh llff`・downsample）まで feat-011 で実証済み（学習〜評価は feat-012）
 
 ## オリジナルコードの変更点
 

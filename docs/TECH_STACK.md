@@ -91,7 +91,7 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 
 | ツール | 状態 | 用途 |
 |--------|------|------|
-| COLMAP | **vcpkg ソースビルド導入済み（feat-008, 2026-06-21）** | 実シーン（HyperNeRF/DyNeRF/multipleview）のSfM/MVS前処理。D-NeRF合成シーンでは不要 |
+| COLMAP | **vcpkg ソースビルド導入済み（feat-008, 2026-06-21、3.12.6）＋ 3.11.1 別 prefix 併設（feat-011, 2026-06-23、rig 非互換回避）** | 実シーン（HyperNeRF/DyNeRF/multipleview）のSfM/MVS前処理。D-NeRF合成シーンでは不要。DyNeRF/multipleview の `colmap.sh`/`multipleviewprogress.sh` 実走時のみ 3.11.1 を使う |
 
 ### COLMAP（feat-008, 2026-06-21）
 
@@ -102,6 +102,19 @@ LD_LIBRARY_PATH=/home/sakagawa/cuda/current/lib64:$LD_LIBRARY_PATH
 - **配置**: vcpkg=`/data/sakagawa/opt/vcpkg`（installed 約 3.7GB、十数 GB に達し得るため /data 配置）。バイナリ=`installed/x64-linux/tools/colmap/colmap`。**PATH ラッパー=`~/.local/bin/colmap`**（`LD_LIBRARY_PATH` に installed/lib を前置して実体を exec）。
 - **ヘッドレス運用**: 本機は DISPLAY 未設定。**GPU SIFT（feature_extractor/exhaustive_matcher の `--use_gpu 1`）は CUDA 有効ビルドによりヘッドレスでも動作**（feat-008 で南棟データ18枚を全登録・実証）。失敗時は `--use_gpu 0`（CPU）にフォールバック（feature/matcher は独立判定）。dense（patch_match_stereo）は CUDA 直で OpenGL 不要。GPU 選択は `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=N`（CLAUDE.md マルチGPU運用）。
 - **再現情報**: ビルドスクリプト・ログ・`build-info.txt` は scratch（`/data/sakagawa/tmp/feat008-colmap/`、非コミット）。vcpkg commit `36393d1`。手順の正本は `docs/issues/feat-008-colmap/design.md`。
+
+### COLMAP 3.11.1 併設（feat-011, 2026-06-23、rig 非互換回避）
+
+- **背景**: COLMAP **3.12 系**は SfM に rig/frame アーキテクチャ（`scene/frame.h`・`scene/rig.h`）を導入し、`reconstruction.cc:166` に `THROW_CHECK(existing_frame.RigId() == frame.RigId())` を持つ。4DGS の `colmap.sh ... llff`（単一カメラ共有 sparse + `point_triangulator`）は DyNeRF/multipleview で `Check failed: existing_frame.RigId()==frame.RigId()` クラッシュする（feat-010 で 3.12.6 が中止に至った原因）。**3.11.1 はこの rig アーキ導入前**で当該アサーションを持たないため、4DGS 本体非改変のまま完走する。
+- **導入方式**: vcpkg manifest + override で **`colmap[core,cuda]:x64-linux@3.11.1#4`** を CUDA 有効・GUI 除外でソースビルド。**別 install-root** `/data/sakagawa/opt/colmap-3.11/installed`（既存 3.12.6 の `/data/sakagawa/opt/vcpkg/installed` と完全分離）。vcpkg バイナリ・downloads・buildtrees は既存ツリーを共有。
+- **builtin-baseline = `37c4e62c5ed20ac4cb09884917bde2cbbccf7aa3`**（2025-11-04、colmap 3.11.1 が baseline）。現 HEAD `36393d1` の eigen 5.0.1 は COLMAP 3.11.1 とビルド非互換（`covariance.cc` の `DenseBase::nonZeros()` 削除）のため、3.11.1 が整合する旧 commit（eigen 3.4.1#1・ceres 2.2.0#5）に固定。
+- **採用 CUDA**: 11.6（feat-008 と同方針、torch cu116 整合）。
+- **ラッパー方式**: `/data/sakagawa/opt/colmap-3.11/bin/colmap`（名前は `colmap`、`LD_LIBRARY_PATH` 空値分岐で `installed/x64-linux/lib` を前置して実体を exec）。**3.11.1 を使うときだけ PATH 先頭に前置**する。既定 `~/.local/bin/colmap`（3.12.6）は不変。
+- **3.12.6 との使い分け**: 既定（`convert.py` の mapper 経路、静的シーン等）は **3.12.6**（`~/.local/bin/colmap`）。DyNeRF/multipleview の `colmap.sh ... llff` / `multipleviewprogress.sh`（既知ポーズ `point_triangulator` + 単一カメラ共有）実走時のみ **3.11.1** を PATH 前置: `PATH="/data/sakagawa/opt/colmap-3.11/bin:/data/sakagawa/4DGaussians/.venv/bin:$PATH" bash -e colmap.sh <dir> llff`。
+- **CPU SIFT**: `colmap.sh:15` の feature_extractor は `--SiftExtraction.estimate_affine_shape 1 --domain_size_pooling 1` 指定により CPU SIFT に自動フォールバック（GPU SIFT 非対応オプション。3.11.1/3.12.6 共通仕様・正常。south-building の mapper 経路と異なり llff 経路は元から CPU SIFT）。dense（`patch_match_stereo`）は GPU を使う。
+- **image_id**: `point_triangulator --clear_points 1` は `TranscribeImageIdsToDatabase`（`reconstruction.cc:471`）で filename ベースに image_id を database へ揃えるため、`sparse_custom` と `database.db` の image_id 数値不一致は正常（Mean reprojection error 0.852px で実証）。
+- **動作実証**: cut_roasted_beef（20カメラ）で `colmap.sh llff` が rig クラッシュなく完走、`fused.ply` 387,496点、Mean reprojection error 0.852px、`points3D_downsample2.ply` 37,361点。git 本体差分ゼロ（非改変）。
+- **再現情報**: manifest `/data/sakagawa/opt/colmap-3.11/vcpkg.json`、ログは scratch（`/data/sakagawa/tmp/feat011-colmap-3.11/`、非コミット）。手順の正本は `docs/issues/feat-011-colmap-3.11/design.md`。
 
 ---
 
