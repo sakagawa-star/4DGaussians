@@ -16,7 +16,7 @@
 | CP0 | クリーン準備＋FR-001検証＋GPU/ポート確定 | 検証済み前提・確定パラメータ | ✅ 完了 2026-06-24 12:53 |
 | CP1 | 学習 train.py 完走 | `output/dynerf/cut_roasted_beef/point_cloud/iteration_14000/` | ✅ 完了 2026-06-24 13:38 |
 | CP2 | レンダリング render.py 完走 | `test/ours_14000/{renders,gt}`・`video/ours_14000/` | ✅ 完了 2026-06-24 16:34 |
-| CP3 | 評価 metrics.py 完走＋健全性チェック | `results.json`・`per_view.json` | ⏳ 未着手 |
+| CP3 | 評価 metrics.py 完走＋健全性チェック | `results.json`・`per_view.json` | ✅ 完了 2026-06-24 17:21 |
 | CP4 | 文書化・クローズ（FR-005） | CLAUDE.md/BACKLOG更新・handover | ⏳ 未着手 |
 
 ## CP0 結果（2026-06-24 12:53）
@@ -35,5 +35,10 @@
 - ログ参考: `point nums: 128979`、FPS 9.35（test）/24.95（video）。ffmpeg は macro_block_size 警告で 1352×1014→1360×1024 にリサイズ（動画化のみ・正常）。
 - VRAM 実測: レンダリングのGPU消費 約2.7GB（A100 40GB に対し小。VRAMは全GPUで充足、選択基準は演算空きのみ＝GPU1）。
 
+## CP3 結果（2026-06-24 17:21）
+- 評価 exit code 0。GPU **N=1** で実行。`results.json`・`per_view.json` 生成。GPU1 解放済み。
+- 6指標すべて有限値・健全: **PSNR 32.96**（≥30合格、論文 33.85・学習中eval test 32.87 とほぼ一致）/ SSIM 0.9471 / MS-SSIM 0.9750 / LPIPS-vgg 0.1526 / LPIPS-alex 0.0528 / D-SSIM 0.0125。
+- ログの torchvision weights API 非推奨 UserWarning は無害（LPIPS の AlexNet 重みロード時の通知のみ）。
+
 ## 次アクション
-- CP3（評価）: ユーザー確認後に着手。コマンド `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 .venv/bin/python metrics.py --model_paths output/dynerf/cut_roasted_beef/`（MPL不要・ポート不使用）。`design.md` §1.7 FR-004 参照。検証は `results.json`・`per_view.json` 生成、6指標が有限値、PSNR≥30（論文 33.85、学習中eval test 32.87）。
+- **CP4（文書化クローズ・FR-005）: ユーザーの結果承認後のみ着手。** 作業: ①CLAUDE.md「データセット」節に DyNeRF(cut_roasted_beef) 学習〜評価 動作確認済み（PSNR 32.96）を追記、②`docs/BACKLOG.md` の feat-012 を Closed に更新、③README 再現手順（任意）、④handover。本体改変ゼロのまま。CP0〜CP3 はすべて合格済み。
