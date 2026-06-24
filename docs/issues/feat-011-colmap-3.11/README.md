@@ -20,9 +20,9 @@ COLMAP **3.12.6**（feat-008 導入版）は 4DGS の `colmap.sh`（既知ポー
 - **3.11.1 は rig 非ネイティブ**のため、単一カメラ共有でも `point_triangulator` が通る見込み（本案件で実証する）。
 - 詳細な調査・トレースバック・検証は `docs/issues/feat-010-dynerf/investigation.md`（イテレーション1-2）。
 
-## 検証用データ（旧 feat-010 から流用）
+## 検証用データ（feat-010（中止） から流用）
 
-旧 feat-010 で取得・前処理済みの **cut_roasted_beef**（`data/dynerf/cut_roasted_beef/`、20カメラ×300フレーム抽出済み）を 3.11.1 の動作確認に流用する（再取得不要）。
+feat-010（中止） で取得・前処理済みの **cut_roasted_beef**（`data/dynerf/cut_roasted_beef/`、20カメラ×300フレーム抽出済み）を 3.11.1 の動作確認に流用する（再取得不要）。
 
 ## ドキュメント
 

@@ -7,7 +7,7 @@
 ## 1.1 プロジェクト概要
 
 - **何を作るのか**: rig 必須化前の最終 minor 版である **COLMAP 3.11.1** を、vcpkg で**別 install prefix** にソースビルドして本マシンに併設する。既存の COLMAP 3.12.6（feat-008 導入）は温存し、4DGS の `colmap.sh`（`scripts/llff2colmap.py` 経由で「既知ポーズ＋単一カメラ共有 sparse モデル」を `point_triangulator` に渡す方式）を **4DGS 本体非改変**のまま 3.11.1 で実走できる状態を構築・実証する。
-- **なぜ作るのか**: feat-008 で導入した COLMAP **3.12.6** は、3.12 で rig/frame モデルがネイティブ化（「各カメラ＝独立 rig」がデフォルト）されたため、`llff2colmap.py` が20画像を単一カメラ（CAMERA_ID=1）で共有させる前提と非互換になり、`point_triangulator` が `Check failed: existing_frame.RigId()==frame.RigId()` で SIGABRT する（旧 feat-010 の実装中に判明）。この結果 DyNeRF（feat-012）・multipleview（feat-013）の COLMAP 前処理が動かない。**4DGS 本体を改変せずに**この前処理を通すため、rig 非ネイティブの 3.11.1 を併設する。
+- **なぜ作るのか**: feat-008 で導入した COLMAP **3.12.6** は、3.12 で rig/frame モデルがネイティブ化（「各カメラ＝独立 rig」がデフォルト）されたため、`llff2colmap.py` が20画像を単一カメラ（CAMERA_ID=1）で共有させる前提と非互換になり、`point_triangulator` が `Check failed: existing_frame.RigId()==frame.RigId()` で SIGABRT する（feat-010（中止） の実装中に判明）。この結果 DyNeRF（feat-012）・multipleview（feat-013）の COLMAP 前処理が動かない。**4DGS 本体を改変せずに**この前処理を通すため、rig 非ネイティブの 3.11.1 を併設する。
 - **誰が使うのか**: 本リポジトリで 4DGS を動かす開発者（複数人共用 GPU サーバー利用）。直接の利用者は後続案件 feat-012（DyNeRF）・feat-013（multipleview）。
 - **どこで使うのか**: Ubuntu / A100-SXM4-40GB ×7（共用）/ uv 管理 `.venv`（Python 3.10）/ ヘッドレス（X ディスプレイ非前提）。CUDA Toolkit 11.6（`/usr/local/cuda-11.6`、ビルド用）。
 
@@ -25,7 +25,7 @@
 - **3.11.1 ラッパー**: colmap.sh 内の bare `colmap` 呼び出しが 3.11.1 を解決するための実行可能スクリプト。専用 bin ディレクトリに **`colmap`** という名前で置き、実行時に PATH 先頭へ前置する（`LD_LIBRARY_PATH` に 3.11.1 の `installed/x64-linux/lib` を前置して実体を exec）。既存 `~/.local/bin/colmap`（3.12.6）はデフォルトのまま変更しない。
 - **colmap.sh llff**: `scripts/llff2colmap.py`（`poses_bounds.npy`→COLMAP テキスト変換、各カメラ先頭フレームを `image_colmap/r_XXX.png` にコピー）→ COLMAP（feature_extractor〜stereo_fusion）を一括実行するシェルスクリプト。**各カメラの先頭フレーム `0000.png` のみ**（=N枚、cut_roasted_beef は20枚）で SfM+MVS を行い `fused.ply` を生成する。スクリプト内部は bare `python`（`colmap.sh:8`・`:16`）と bare `colmap` を呼ぶ。
 - **bare python / bare colmap の PATH 解決**: 本環境に bare `python` は無く（`python3` のみ）、`colmap` は既定で 3.12.6。colmap.sh を**非改変**で 3.11.1 実走するため、実行時に `PATH="<3.11.1 bin>:/data/sakagawa/4DGaussians/.venv/bin:$PATH"` を前置し、bare `python`→`.venv/bin/python`、bare `colmap`→3.11.1 に解決する。
-- **検証データ cut_roasted_beef**: 旧 feat-010 で取得・抽出済みの DyNeRF シーン（`data/dynerf/cut_roasted_beef/`、20カメラ mp4・`poses_bounds.npy`・各 `camXX/images/0000.png〜0299.png`）。本案件で**再取得・再抽出は不要**（実機確認済み）。
+- **検証データ cut_roasted_beef**: feat-010（中止） で取得・抽出済みの DyNeRF シーン（`data/dynerf/cut_roasted_beef/`、20カメラ mp4・`poses_bounds.npy`・各 `camXX/images/0000.png〜0299.png`）。本案件で**再取得・再抽出は不要**（実機確認済み）。
 
 ## 1.3 機能要求一覧
 
@@ -66,7 +66,7 @@
 
 ### FR-003: cut_roasted_beef で colmap.sh ... llff を 3.11.1 実走（4DGS 本体完全非改変、rig 非互換解消の実証）
 
-- **概要**: 旧 feat-010 の検証データ cut_roasted_beef を用い、`colmap.sh ... llff` を **3.11.1** で実走し、3.12.6 で SIGABRT していた `point_triangulator` が rig エラーなく完走して `fused.ply`（点数>0）が生成されることを実証する。**4DGS 本体（colmap.sh を含む）は1行も改変しない**（GPU 選択は colmap.sh:5 のハードコード=GPU0 に従う。`colmap.sh:5` の引数化は feat-012 のスコープ）。
+- **概要**: feat-010（中止） の検証データ cut_roasted_beef を用い、`colmap.sh ... llff` を **3.11.1** で実走し、3.12.6 で SIGABRT していた `point_triangulator` が rig エラーなく完走して `fused.ply`（点数>0）が生成されることを実証する。**4DGS 本体（colmap.sh を含む）は1行も改変しない**（GPU 選択は colmap.sh:5 のハードコード=GPU0 に従う。`colmap.sh:5` の引数化は feat-012 のスコープ）。
 - **入力**:
   - 前提: cut_roasted_beef のフレーム抽出済み（実機確認済み: 20カメラ・各 `camXX/images/0000.png` 存在）。万一欠落時のみ `.venv/bin/python scripts/preprocess_dynerf.py --datadir data/dynerf/cut_roasted_beef` を再実行。
   - 実行（cwd=リポジトリルート `/data/sakagawa/4DGaussians`。`PATH` 先頭へ 3.11.1 bin と `.venv/bin` を前置。**`bash -e`** で最初の COLMAP コマンド失敗時に即停止させ、`sparse/0` 空による後段の連鎖失敗を排除する＝colmap.sh 自体は非改変で実行方法のみ変更）:
@@ -135,7 +135,7 @@
   - 既存 COLMAP **3.12.6 を削除・置換・上書きしない**（温存）。デフォルトの `~/.local/bin/colmap` は 3.12.6 のまま変更しない。
   - **`uv sync` / `uv pip sync` は使わない**（本案件は Python 依存追加が無いため、そもそも `uv pip install` も発生しない見込み）。`pyproject.toml` は作らない。
 - **ネットワーク**: vcpkg が 3.11.1 とその依存のソース tarball を取得する（GitHub 等）。既存 downloads キャッシュにある分は再DLしない。
-- **既存 colmap.sh 中間生成物**: cut_roasted_beef の `colmap/`・`sparse_`・`image_colmap`（旧 feat-010 検証の手動生成物・`fused.ply` 含む）は残存するが、`colmap.sh` 冒頭が `rm -rf` して作り直すため FR-003 実行で上書きされる（事前手動削除は不要）。
+- **既存 colmap.sh 中間生成物**: cut_roasted_beef の `colmap/`・`sparse_`・`image_colmap`（feat-010（中止） 検証の手動生成物・`fused.ply` 含む）は残存するが、`colmap.sh` 冒頭が `rm -rf` して作り直すため FR-003 実行で上書きされる（事前手動削除は不要）。
 
 ## 1.6 優先順位（MoSCoW）
 

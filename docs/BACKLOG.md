@@ -91,7 +91,7 @@
 
 > **ここから「4DGS全体が動く環境」への拡張フェーズ（2026-06-18 ロードマップ策定）。** ゴール・スコープは本ファイル冒頭を参照。優先順は「Phase 6（マルチGPU運用）→ Phase 7（COLMAP）→ Phase 8〜10（実シーン3系統）」。各 feat-XXX は着手時に `docs/issues/feat-{number}-{slug}/` を作成する。
 >
-> **2026-06-23 番号繰り下げ**: 旧 feat-010（DyNeRF）の実装で COLMAP **3.12.6 の rig/frame 非互換**（`colmap.sh` の `point_triangulator`＋単一カメラ共有が `Check failed: existing_frame.RigId()==frame.RigId()` でクラッシュ）が判明したため、Phase 7 に **COLMAP 3.11.1 併設（feat-011）** を挿入し、**DyNeRF を feat-012・multipleview を feat-013 に繰り下げ**た（旧 feat-010 は**中止**、調査資産は feat-012 が継承）。
+> **2026-06-23 番号繰り下げ**: feat-010（中止）（DyNeRF）の実装で COLMAP **3.12.6 の rig/frame 非互換**（`colmap.sh` の `point_triangulator`＋単一カメラ共有が `Check failed: existing_frame.RigId()==frame.RigId()` でクラッシュ）が判明したため、Phase 7 に **COLMAP 3.11.1 併設（feat-011）** を挿入し、**DyNeRF を feat-012・multipleview を feat-013 に繰り下げ**た（feat-010（中止） は**中止**、調査資産は feat-012 が継承）。
 
 ### Phase 6: マルチGPU運用対応（任意GPU選択）
 
@@ -106,12 +106,12 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Closed**（2026-06-21、手動テスト合格）。導入方式=**vcpkg ソースビルド**〔`colmap[core,cuda]:x64-linux@3.12.6`、GUI除外・CUDA11.6有効〕。ビルドに gfortran 必須が判明し `sudo apt`〔管理者承認〕で導入。FR-001〜006 自己検証＋ユーザー手動テストとも合格: `colmap -h` 動作、`~/.local/bin/colmap` ラッパー、scikit-image 0.22.0 導入（open3d 0.19.0 維持）、south-building 18枚で疎再構成（登録18/18・3D点≈3755）・dense（fused.ply 約122万点）完走、GPU SIFT ヘッドレス動作実証。経緯・ADR・investigation は `docs/issues/feat-008-colmap/`）。**※2026-06-23 追記: 旧 feat-010（DyNeRF）の実装で、3.12.6 は 4DGS の `colmap.sh`（`point_triangulator`＋単一カメラ共有 sparse モデル）と rig/frame 非互換（`Check failed: existing_frame.RigId()==frame.RigId()`）と判明。feat-011 で rig 非ネイティブの 3.11.1 を併設する** |
+| feat-008 | COLMAP環境構築 | 実シーン全系統（HyperNeRF/DyNeRF/multipleview）の前提となるCOLMAPを本マシンに導入する。`convert.py`/`colmap.sh`/`multipleviewprogress.sh` が依存する `colmap` バイナリと、前処理の依存ライブラリ（open3d〔downsample_point.py〕等）を整備し、小規模データで動作確認する | feat-007 | **Closed**（2026-06-21、手動テスト合格）。導入方式=**vcpkg ソースビルド**〔`colmap[core,cuda]:x64-linux@3.12.6`、GUI除外・CUDA11.6有効〕。ビルドに gfortran 必須が判明し `sudo apt`〔管理者承認〕で導入。FR-001〜006 自己検証＋ユーザー手動テストとも合格: `colmap -h` 動作、`~/.local/bin/colmap` ラッパー、scikit-image 0.22.0 導入（open3d 0.19.0 維持）、south-building 18枚で疎再構成（登録18/18・3D点≈3755）・dense（fused.ply 約122万点）完走、GPU SIFT ヘッドレス動作実証。経緯・ADR・investigation は `docs/issues/feat-008-colmap/`）。**※2026-06-23 追記: feat-010（中止）（DyNeRF）の実装で、3.12.6 は 4DGS の `colmap.sh`（`point_triangulator`＋単一カメラ共有 sparse モデル）と rig/frame 非互換（`Check failed: existing_frame.RigId()==frame.RigId()`）と判明。feat-011 で rig 非ネイティブの 3.11.1 を併設する** |
 | feat-011 | COLMAP 3.11.1 併設（rig非互換回避） | COLMAP **3.11.1**（rig 必須化前の最終版）を vcpkg で別 prefix にビルドし、4DGS の `colmap.sh`/`multipleviewprogress.sh` 系（既知ポーズ `point_triangulator`＋単一カメラ共有）を**本体非改変**で動かせるようにする。既存 3.12.6 は温存し、DyNeRF/multipleview 前処理時のみ 3.11.1 を使う | feat-008 | **Closed**（2026-06-23、手動テスト合格）。導入方式=**vcpkg manifest+override**〔`colmap[core,cuda]:x64-linux@3.11.1#4`、別 install-root `/data/sakagawa/opt/colmap-3.11/installed`、builtin-baseline `37c4e62c`〕。ラッパー `/data/sakagawa/opt/colmap-3.11/bin/colmap` を PATH 前置。FR-001〜005 自己検証＋ユーザー手動テストとも合格: 版 `COLMAP 3.11.1 with CUDA`、既存 3.12.6 無傷、cut_roasted_beef で `colmap.sh llff` が rig クラッシュなく完走（fused.ply 387,496点・Mean reprojection error 0.852px・20/20登録）、`points3D_downsample2.ply` 37,361点、4DGS 本体非改変。**rig 理論を実ソースで裏取り**（3.11.1 に `RigId` 整合アサーション無し）、**image_id 数値不一致は `--clear_points 1` の `TranscribeImageIdsToDatabase` で filename 整合され正常**＝feat-010 の対処A'は 3.11.1 では不要と判明。経緯・ADR・investigation は `docs/issues/feat-011-colmap-3.11/` |
 
 **判定基準（案・feat-008）**: `colmap --help`（または相当）が通る。`scripts/downsample_point.py`（open3d）が import エラーなく動く。小規模データでCOLMAP（feature_extractor〜mapper）が完走する。**本マシンはcolmap未インストール（CLAUDE.md実行環境表）のため、導入方法〔ソースビルド or 配布バイナリ〕の調査・選定が案件の主眼**
 
-**判定基準（案・feat-011）**: COLMAP 3.11.1 が別 prefix にビルドされ、既存 3.12.6 を壊さず併存する。3.11.1 の colmap で 4DGS の `colmap.sh ... llff`（旧 feat-010 の cut_roasted_beef データ）が `point_triangulator`〜`stereo_fusion` まで完走し `fused.ply`（点数>0）を生成する（rig エラーが出ない）。`downsample_point.py` で `points3D_downsample2.ply`（≤40k点）まで通る。
+**判定基準（案・feat-011）**: COLMAP 3.11.1 が別 prefix にビルドされ、既存 3.12.6 を壊さず併存する。3.11.1 の colmap で 4DGS の `colmap.sh ... llff`（feat-010（中止） の cut_roasted_beef データ）が `point_triangulator`〜`stereo_fusion` まで完走し `fused.ply`（点数>0）を生成する（rig エラーが出ない）。`downsample_point.py` で `points3D_downsample2.ply`（≤40k点）まで通る。
 
 ### Phase 8: HyperNeRF動作確認（実シーン・単眼）
 
@@ -126,7 +126,7 @@
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
 | ~~feat-010~~ | DyNeRF動作確認（**中止**） | feat-008 の COLMAP 3.12.6 が rig 非互換と判明し中止（2026-06-23）。調査資産（cut_roasted_beef データDL・フレーム抽出済、root cause 分析、requirements/design）は feat-012 が継承 | feat-008 | **中止（Cancelled, 2026-06-23）**。`docs/issues/feat-010-dynerf/` 参照 |
-| feat-012 | DyNeRF動作確認（再開） | 実シーン・多視点の1シーン（cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`、**COLMAP 3.11.1 を使用**）→ダウンサンプリング→学習→レンダリング→評価を動かす。旧 feat-010 の調査資産（データ・root cause・確定事項）を継承 | feat-011 | **Open** |
+| feat-012 | DyNeRF動作確認（再開） | 実シーン・多視点の1シーン（cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`、**COLMAP 3.11.1 を使用**）→ダウンサンプリング→学習→レンダリング→評価を動かす。feat-010（中止） の調査資産（データ・root cause・確定事項）を継承 | feat-011 | **In Progress**（2026-06-24 着手・案件フォルダ作成。要求仕様・設計はこれから） |
 
 **判定基準（案）**: 前処理3段（preprocess_dynerf.py / colmap.sh llff / downsample_point.py）が完走し、`train.py`→`render.py`→`metrics.py` が完走する。ffmpeg（imageio）依存に注意（`scene/dataset_readers.py:readdynerfInfo`、判定は poses_bounds.npy の存在）。**COLMAP は feat-011 で導入する 3.11.1 を使う**
 

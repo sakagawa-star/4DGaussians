@@ -206,7 +206,7 @@ data/dynerf/cut_roasted_beef/                # 検証データ（git 未追跡�
 - **B5: image_id 数値不一致は正常（実証で確定）**: feature_extractor が database に振る image_id が `sparse_custom/images.txt`（name 順）と数値で食い違っても、`point_triangulator --clear_points 1` の `TranscribeImageIdsToDatabase` が **filename で image_id を database に揃え直す**ため幾何対応は保たれる（実測 reprojection error 0.852px）。よって旧 B5 が懸念した「点群はできても幾何が壊れる偽陽性」は本経路では起きない。**真に異常なケース**は (a) reprojection error が大きい（>数px）、(b) `Image with name ... does not exist in database` の FATAL_THROW（name 不一致）、(c) registered images < 20 — いずれかが出た場合のみ investigation に記録し、PATH が 3.12.6 を拾っていないか（`colmap -h`）等を確認する。
 
 #### 境界条件
-- 再実行: `colmap.sh` 冒頭が `sparse_`/`image_colmap`/`colmap` を `rm -rf` して作り直すため冪等。旧 feat-010 の手動生成物も上書きされる。
+- 再実行: `colmap.sh` 冒頭が `sparse_`/`image_colmap`/`colmap` を `rm -rf` して作り直すため冪等。feat-010（中止） の手動生成物も上書きされる。
 - GPU 引数: colmap.sh 非改変のため第3引数は受け付けない（GPU0 固定）。任意 GPU 選択は feat-012 で引数化後に可能。
 
 ### 1.4.4 FR-004: ダウンサンプル（downsample_point.py）
@@ -323,7 +323,7 @@ data/dynerf/cut_roasted_beef/               # 検証データ（git 未追跡・
 - **却下C（別名 `colmap-3.11` だけ作る）**: colmap.sh は bare `colmap` を呼ぶため、別名では拾えない。`colmap` 名のラッパーを専用 bin に置き PATH で切り替えるのが、非改変と分離を両立する唯一の方法。
 
 ### ADR-5: 検証データ = cut_roasted_beef（colmap.sh llff 経路）。south-building ではない
-- **採用**: 旧 feat-010 の cut_roasted_beef（LLFF・単一カメラ共有 → `point_triangulator`）で検証する。
+- **採用**: feat-010（中止） の cut_roasted_beef（LLFF・単一カメラ共有 → `point_triangulator`）で検証する。
 - **却下（feat-008 の south-building）**: south-building は `colmap mapper`（増分 SfM）経路で、単一カメラ共有 sparse モデルを `point_triangulator` に渡さないため **rig 非互換が発生しない**＝本問題の検証にならない。rig SIGABRT は `llff2colmap.py`＋`point_triangulator` 経路に固有なので、その経路（`colmap.sh ... llff`）で検証する必要がある。
 - **根拠**: 本案件のゴールは「3.11.1 で rig 非互換が解消されること」の実証であり、再現経路そのもの（cut_roasted_beef + colmap.sh llff）で確認するのが妥当。データは取得・抽出済みで追加コストゼロ。
 
