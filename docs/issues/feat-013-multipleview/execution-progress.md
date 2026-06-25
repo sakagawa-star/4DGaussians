@@ -17,7 +17,7 @@
 |----|------|----------------|------|
 | CP0 | 準備（GPU/ポート確定・LLFF clone・依存確認・scratch作成） | 確定パラメータ | ✅ 完了 2026-06-25 |
 | CP1 | データ再編成（FR-001） | `data/multipleview/cut_roasted_beef/camNN/frame_XXXXX.jpg` | ✅ 完了 2026-06-25 |
-| CP2 | COLMAP+LLFF 前処理（FR-002） | sparse_・points3D_multipleview.ply・poses_bounds_multipleview.npy | ⏳ 未着手 |
+| CP2 | COLMAP+LLFF 前処理（FR-002） | sparse_・points3D_multipleview.ply・poses_bounds_multipleview.npy | ✅ 完了 2026-06-25 |
 | CP3 | config作成＋学習（FR-003） | `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` | ⏳ 未着手 |
 | CP4 | レンダリング（FR-004、--skip_video） | `test/ours_XXXXX/{renders,gt}` | ⏳ 未着手 |
 | CP5 | 評価（FR-005） | results.json・per_view.json | ⏳ 未着手 |
@@ -37,6 +37,16 @@
 - 結果: **cam01〜cam20 の連番20カメラ**（DyNeRF の cam04 欠番を詰めて解消）、**各300枚**（`frame_00001.jpg`〜`frame_00300.jpg`）、**真JPEG quality95**・1352×1014 RGB。総容量 1.7GB。
 - FR-001 検証通過: cam01 存在・全カメラ同数（300）・命名連番（cam01..cam20）をスクリプト内 assert で確認。
 
+## CP2 結果（2026-06-25）
+
+- COLMAP 3.11.1（PATH前置）で前処理を個別コマンド実行（`multipleviewprogress.sh` 非改変）。
+- ① `extractimages.py`: 各camの frame_00001 → image1〜image20.jpg（20枚）。
+- ② SfM（feature/matcher は **CPU固定** `use_gpu 0`、mapper）: exit0、約0.19分。**model_analyzer 健全性合格**: Registered images **20/20**、Points 4718、**Mean reprojection error 0.769px（<1.5px）**。
+- ③ dense（GPU0、バックグラウンド＋ログ）: image_undistorter→patch_match_stereo（約10分）→stereo_fusion。`fused.ply`(10MB) 生成。
+- ④ `downsample_point.py`: fused.ply → `points3D_multipleview.ply`（**36,357点**）。
+- ⑤ LLFF `imgs2poses.py`（事前clone・py3互換OK・GPU不要）: `poses_bounds.npy` 生成 → `poses_bounds_multipleview.npy`（**shape=(20,17)**）。Cameras5/Images20/Points(4718,3)。
+- 成果物検証通過: sparse_/{cameras,images}.bin（20画像・imageN.jpg形式）・points3D_multipleview.ply 36,357点・poses_bounds (20,17)。`colmap_tmp` 掃除済み。
+
 ## 次アクション
 
-- **CP2（COLMAP+LLFF 前処理）**: design §3.2/§3.3 のコマンドを実行（COLMAP 3.11.1 PATH前置、feature/matcher CPU固定、dense は GPU0、LLFF imgs2poses）。dense はバックグラウンド＋ログ。完了後 §3.4 検証（model_analyzer 20/20登録・再投影誤差<1.5px・点数>0）。
+- **CP3（config作成＋学習）**: `arguments/multipleview/cut_roasted_beef.py`（default.py複製）を作成 → design §5.1 の train.py（GPU0・port6017・MPL環境変数）をバックグラウンド＋ログで実行。完了後 `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` を確認。
