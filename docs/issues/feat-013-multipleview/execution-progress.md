@@ -21,7 +21,7 @@
 | CP3 | config作成＋学習（FR-003） | `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` | ✅ 完了 2026-06-25 |
 | CP4 | レンダリング（FR-004、--skip_video） | `test/ours_XXXXX/{renders,gt}` | ✅ 完了 2026-06-25 |
 | CP5 | 評価（FR-005） | results.json・per_view.json | ✅ 完了 2026-06-25 |
-| CP6 | 文書化・クローズ（FR-006） | CLAUDE.md/BACKLOG/台帳 | ⏳ 未着手 |
+| CP6 | 文書化・クローズ（FR-006） | CLAUDE.md/BACKLOG/台帳 | ✅ 完了 2026-06-25 |
 
 ## CP0 結果（2026-06-25）
 
@@ -66,6 +66,15 @@
 - 6指標すべて FR-005 数値基準を満たす: **PSNR 32.38**（≥20）/ SSIM 0.9326（[0,1]）/ MS-SSIM 0.9658（[0,1]）/ D-SSIM 0.0171（[0,0.5]）/ LPIPS-vgg 0.1648（finite≥0）/ LPIPS-alex 0.0687（finite≥0）。
 - multipleview は held-out カメラ無し＝学習視点再構成。学習中eval test 31.24 と整合（評価は20カメラ×3時刻＝全時刻平均で test より高め、健全）。
 
-## 次アクション
+## CP6 結果（2026-06-25）
 
-- **CP6（文書化・クローズ）**: CLAUDE.md データセット節に multipleview 行追記・`docs/BACKLOG.md` feat-013 を Closed・CLAUDE.md ディレクトリ構成に config 追記・台帳完了サマリ。本体改変ゼロ（追加 config のみ）。
+- ユーザー承認後（レンダ画像の目視確認＝floater/ソフトさは4DGS既知特性で正常と合意）に文書化クローズ実施。FR-006 完了:
+  - `CLAUDE.md`「データセット」節に **multipleview 行**を追記（再編成手順・本体非改変の前処理コマンド・COLMAP使い分け・config・MPL注意・PSNR 32.38）。
+  - `docs/BACKLOG.md` feat-013 を **Closed（2026-06-25）** に更新＋判定基準に実測合格を追記。
+  - 本体「オリジナルコードの変更点」への追記なし（本体改変ゼロ）。追加は config `arguments/multipleview/cut_roasted_beef.py` のみ（通常運用・CP3でコミット済み）。`requirements.lock.txt` 再生成なし（新規ライブラリなし）。
+
+## 完了サマリ
+
+- **multipleview（多視点・カスタム）の前処理〜学習〜評価が 4DGaussians 環境で正常動作することを確認**（cut_roasted_beef 再編成、PSNR 32.38・6指標健全）。
+- これでロードマップの**実シーン3系統（HyperNeRF〔feat-009〕・DyNeRF〔feat-012〕・multipleview〔feat-013〕）がすべて完了**。D-NeRF（合成）と合わせ実装済み4データセット系統すべてで学習〜評価が動くことを実証。
+- 本体改変ゼロ達成。`multipleviewprogress.sh` 非改変（uv非互換の pip install/git clone と GPU0 ハードコードはラッパー/事前導入/環境変数で回避）。GPU引数化は将来 COLMAP 再実走案件へ残置。

@@ -134,9 +134,9 @@
 
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
-| feat-013 | multipleview動作確認 | 多視点カスタムデータで `multipleviewprogress.sh`（フレーム抽出→COLMAP→LLFFポーズ→ダウンサンプリング）→config作成→学習を動かす。COLMAP 実走は **3.11.1** を使う（同種の rig 非互換回避） | feat-011 | **Open** |
+| feat-013 | multipleview動作確認 | 多視点カスタムデータで `multipleviewprogress.sh`（フレーム抽出→COLMAP→LLFFポーズ→ダウンサンプリング）→config作成→学習を動かす。COLMAP 実走は **3.11.1** を使う（同種の rig 非互換回避） | feat-011 | **Closed（2026-06-25）**。CP0〜CP6 完走。既存 DyNeRF cut_roasted_beef を multipleview 形式へ再編成し前処理〜学習〜評価（PSNR 32.38・6指標健全）。本体改変ゼロ（`multipleviewprogress.sh` 非改変・個別コマンド実行、追加 config のみ）。`docs/issues/feat-013-multipleview/` 参照 |
 
-**判定基準（案）**: `multipleviewprogress.sh` が完走し `sparse_/`・`points3D_multipleview.ply`・`poses_bounds_multipleview.npy` が生成される。`arguments/multipleview/{name}.py` 作成の上 `train.py` が完走する。LLFF（scikit-image）依存に注意（`scene/dataset_readers.py:readMultipleViewinfos`、判定は points3D_multipleview.ply の存在）
+**判定基準**: `multipleviewprogress.sh` 相当の前処理が完走し `sparse_/`・`points3D_multipleview.ply`・`poses_bounds_multipleview.npy` が生成される。`arguments/multipleview/{name}.py` 作成の上 `train.py` が完走する。LLFF（scikit-image）依存に注意（`scene/dataset_readers.py:readMultipleViewinfos`、判定は points3D_multipleview.ply の存在）。**実測合格（2026-06-25）**: 既存 DyNeRF cut_roasted_beef を multipleview 形式へ再編成（cam01〜20連番・各300枚JPEG）。前処理（COLMAP 3.11.1 個別コマンド・登録20/20・再投影誤差0.77px・点群36,357・poses(20,17)）→学習（iteration_14000）→レンダ（renders/gt各60枚）→評価（PSNR 32.38・6指標健全）すべて完走。本体非改変（`multipleviewprogress.sh` の `pip install`/`git clone`/GPU0ハードコードはラッパー/事前導入で回避）。
 
 ---
 
