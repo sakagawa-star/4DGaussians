@@ -19,8 +19,8 @@
 | CP1 | データ再編成（FR-001） | `data/multipleview/cut_roasted_beef/camNN/frame_XXXXX.jpg` | ✅ 完了 2026-06-25 |
 | CP2 | COLMAP+LLFF 前処理（FR-002） | sparse_・points3D_multipleview.ply・poses_bounds_multipleview.npy | ✅ 完了 2026-06-25 |
 | CP3 | config作成＋学習（FR-003） | `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` | ✅ 完了 2026-06-25 |
-| CP4 | レンダリング（FR-004、--skip_video） | `test/ours_XXXXX/{renders,gt}` | ⏳ 未着手 |
-| CP5 | 評価（FR-005） | results.json・per_view.json | ⏳ 未着手 |
+| CP4 | レンダリング（FR-004、--skip_video） | `test/ours_XXXXX/{renders,gt}` | ✅ 完了 2026-06-25 |
+| CP5 | 評価（FR-005） | results.json・per_view.json | ✅ 完了 2026-06-25 |
 | CP6 | 文書化・クローズ（FR-006） | CLAUDE.md/BACKLOG/台帳 | ⏳ 未着手 |
 
 ## CP0 結果（2026-06-25）
@@ -54,6 +54,18 @@
 - 学習中eval（健全）: [ITER3000] train PSNR 30.00 / [ITER7000] test 30.06・train 31.01 / **[ITER14000] test 31.24・train 32.68**。
 - 成果物: `point_cloud/iteration_14000/` に point_cloud.ply(45M)・deformation.pth(9.9M)・deformation_table.pth・deformation_accum.pth。保存 iteration は feat-012 と同機構（`save_iterations` 最小14000、fine段階で到達。15000は未保存）。
 
+## CP4 結果（2026-06-25）
+
+- レンダリング（GPU0・MPL環境変数・`--skip_train --skip_video`）: exit0、約7秒（point nums 182050、FPS 12.85）。
+- 成果物: `test/ours_14000/renders`=60枚・`gt`=60枚（20カメラ×3時刻、**ファイル名集合 完全一致** 00000〜00059.png）・`video_rgb.mp4`（testセットのモンタージュ）。`--skip_video` で spiral video（`video/`）は非生成を確認。
+- ffmpeg macro_block_size 警告（1352×1014→1360×1024）は動画化のみ・正常。
+
+## CP5 結果（2026-06-25）
+
+- 評価（GPU0、バックグラウンド＋ログ）: exit0、`results.json`・`per_view.json` 生成。
+- 6指標すべて FR-005 数値基準を満たす: **PSNR 32.38**（≥20）/ SSIM 0.9326（[0,1]）/ MS-SSIM 0.9658（[0,1]）/ D-SSIM 0.0171（[0,0.5]）/ LPIPS-vgg 0.1648（finite≥0）/ LPIPS-alex 0.0687（finite≥0）。
+- multipleview は held-out カメラ無し＝学習視点再構成。学習中eval test 31.24 と整合（評価は20カメラ×3時刻＝全時刻平均で test より高め、健全）。
+
 ## 次アクション
 
-- **CP4（レンダリング）**: design §5.2 の render.py（`--skip_train --skip_video`、GPU0・MPL環境変数）を実行。完了後 `test/ours_14000/{renders,gt}` の生成・ファイル名集合一致を確認。
+- **CP6（文書化・クローズ）**: CLAUDE.md データセット節に multipleview 行追記・`docs/BACKLOG.md` feat-013 を Closed・CLAUDE.md ディレクトリ構成に config 追記・台帳完了サマリ。本体改変ゼロ（追加 config のみ）。
