@@ -63,7 +63,7 @@
      bash -e colmap.sh <workdir> llff
    ```
    - 3.11.1 は別 prefix（`/data/sakagawa/opt/colmap-3.11/`）に分離され、PATH 前置を外せば既定 3.12.6 のまま（既存ワークフロー非破壊）。
-   - GPU は `colmap.sh:5` のハードコード（`CUDA_VISIBLE_DEVICES=0`）に従う。**GPU0 使用中なら空くまで待つ**（任意 GPU 選択は colmap.sh:5 引数化＝feat-012 スコープ）。
+   - GPU は `colmap.sh:5` のハードコード（`CUDA_VISIBLE_DEVICES=0`）に従う。**GPU0 使用中なら空くまで待つ**（任意 GPU 選択＝`colmap.sh:5` 引数化は将来の COLMAP 再実走案件〔feat-013 等〕で検討。feat-012 は前処理流用で `colmap.sh` を実走せず動作確認できないため対象外）。
    - `feature_extractor` は CPU SIFT（`colmap.sh:15` の `estimate_affine_shape`/`domain_size_pooling` 指定のため自動フォールバック、正常）。dense（`patch_match_stereo`）は GPU0。
    - `point_triangulator --clear_points 1` は filename で image_id を database に揃える（`sparse_custom` と `database.db` の image_id 数値不一致は正常）。
    - 詳細は `docs/TECH_STACK.md`「COLMAP 3.11.1 併設」節・`docs/issues/feat-011-colmap-3.11/`。
@@ -87,7 +87,7 @@
 
 - **D-NeRF（合成シーン）**: 最初の動作確認に使用。**取得済み（feat-003, 2026-05-22）**。Dropbox の `data.zip`（246MB）を展開し `data/dnerf/{scene}/` へ全8シーン（bouncingballs/hellwarrior/hook/jumpingjacks/lego/mutant/standup/trex）を配置。各シーンに `transforms_{train,val,test}.json` と `train/`・`val/`・`test/`（png）。本体は train/test のみ読込。`data/` は `.gitignore` 管理外（git未追跡。再取得手順は `docs/issues/feat-003-dnerf-data/design.md` 参照）
 - **HyperNeRF（実シーン・単眼）**: **broom2 で学習〜評価 動作確認済み（feat-009, 2026-06-21）**。HyperNeRF v0.1 リリース `vrig_broom.zip`（1.5GB）を `data/hypernerf/virg/` へ展開（zipトップが `broom2/` のため `data/hypernerf/virg/broom2/` ができる。画像394枚・`rgb/2x` 必須）。点群は Google Drive の事前生成COLMAP点群（file id `1fUHiSgimVjVQZ2OOzTFtz02E9EqCoWr5`）を **gdown** でDLし `points3D_downsample2.ply`（38,569点）を配置（**COLMAP 実走不要**）。学習は `--configs arguments/hypernerf/broom2.py`、`render.py --skip_train`→`metrics.py` で PSNR 22.08/MS-SSIM 0.691（論文 22.0/0.70）。視覚的裏付けに chicken（`vrig_chicken.zip`→`data/hypernerf/virg/vrig-chicken/`、点群は事前生成zip内 `virg-chickchicken/`、config `chicken.py`）も実施し PSNR 28.65/MS-SSIM 0.930（論文 28.7/0.93、目視で鮮明と確認）。**train/render は `MPLBACKEND=Agg MPLCONFIGDIR=... TMPDIR=...` を付与**（読込時 `plot_camera_orientations` が matplotlib で `output.png` を CWD に savefig するため）。詳細は `docs/issues/feat-009-hypernerf/`。`data/` は `.gitignore` 管理外（git未追跡）
-- **Plenoptic / DyNeRF（Neural 3D Video）**: フレーム抽出 + colmap 前処理が必要（**COLMAP は feat-011 で併設した 3.11.1 を使う**。3.12.6 は `colmap.sh ... llff` の `point_triangulator` で rig 非互換クラッシュ。使い分けは「COLMAP の使い分け」節参照）。cut_roasted_beef は前処理（フレーム抽出・`colmap.sh llff`・downsample）まで feat-011 で実証済み（学習〜評価は feat-012）
+- **Plenoptic / DyNeRF（Neural 3D Video）**: **cut_roasted_beef で学習〜評価 動作確認済み（feat-012, 2026-06-24、test PSNR 32.96 / 論文 33.85）**。フレーム抽出 + colmap 前処理が必要（**COLMAP は feat-011 で併設した 3.11.1 を使う**。3.12.6 は `colmap.sh ... llff` の `point_triangulator` で rig 非互換クラッシュ。使い分けは「COLMAP の使い分け」節参照）。前処理（フレーム抽出・`colmap.sh llff`・downsample）は feat-011 で実証済み。入力は `data/dynerf/cut_roasted_beef/`（`cam*.mp4`×20・`camXX/images`各300枚〔cam04欠番〕・`poses_bounds.npy`(20,17)・`points3D_downsample2.ply` 37,361点）。学習 `--configs arguments/dynerf/cut_roasted_beef.py`（`iteration_14000` 生成）→`render.py --skip_train`（test/video）→`metrics.py --model_paths` で 6指標健全（PSNR 32.96 / SSIM 0.9471 / MS-SSIM 0.9750 / LPIPS-vgg 0.1526 / LPIPS-alex 0.0528 / D-SSIM 0.0125）。**train/render は `MPLBACKEND=Agg MPLCONFIGDIR=... TMPDIR=...` を付与**（`regulation.py:5`・`scene_utils.py:4` の matplotlib top-level import 対策。metrics は不要）。GPU 系コマンドは `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=N`。詳細は `docs/issues/feat-012-dynerf/`。`data/` は `.gitignore` 管理外（git未追跡）
 
 ## オリジナルコードの変更点
 

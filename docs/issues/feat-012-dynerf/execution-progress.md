@@ -17,7 +17,7 @@
 | CP1 | 学習 train.py 完走 | `output/dynerf/cut_roasted_beef/point_cloud/iteration_14000/` | ✅ 完了 2026-06-24 13:38 |
 | CP2 | レンダリング render.py 完走 | `test/ours_14000/{renders,gt}`・`video/ours_14000/` | ✅ 完了 2026-06-24 16:34 |
 | CP3 | 評価 metrics.py 完走＋健全性チェック | `results.json`・`per_view.json` | ✅ 完了 2026-06-24 17:21 |
-| CP4 | 文書化・クローズ（FR-005） | CLAUDE.md/BACKLOG更新・handover | ⏳ 未着手 |
+| CP4 | 文書化・クローズ（FR-005） | CLAUDE.md/BACKLOG更新・handover | ✅ 完了 2026-06-24 |
 
 ## CP0 結果（2026-06-24 12:53）
 - 残骸掃除: 旧 `output/dynerf/cut_roasted_beef/`（cfg_args のみ）削除、孤児 `pymp-*`（16個）削除。
@@ -40,5 +40,14 @@
 - 6指標すべて有限値・健全: **PSNR 32.96**（≥30合格、論文 33.85・学習中eval test 32.87 とほぼ一致）/ SSIM 0.9471 / MS-SSIM 0.9750 / LPIPS-vgg 0.1526 / LPIPS-alex 0.0528 / D-SSIM 0.0125。
 - ログの torchvision weights API 非推奨 UserWarning は無害（LPIPS の AlexNet 重みロード時の通知のみ）。
 
-## 次アクション
-- **CP4（文書化クローズ・FR-005）: ユーザーの結果承認後のみ着手。** 作業: ①CLAUDE.md「データセット」節に DyNeRF(cut_roasted_beef) 学習〜評価 動作確認済み（PSNR 32.96）を追記、②`docs/BACKLOG.md` の feat-012 を Closed に更新、③README 再現手順（任意）、④handover。本体改変ゼロのまま。CP0〜CP3 はすべて合格済み。
+## CP4 結果（2026-06-24）
+- ユーザー承認後に文書化クローズ実施。FR-005 完了:
+  - `CLAUDE.md`「データセット」節 DyNeRF 行を「cut_roasted_beef で学習〜評価 動作確認済み（PSNR 32.96）」に更新（確定手順・入力・コマンド・MPL注意を記載）。
+  - `CLAUDE.md`「COLMAP の使い分け」節の「任意GPU選択＝colmap.sh:5 引数化は feat-012 スコープ」を「将来案件（feat-013 等）で検討、feat-012 は対象外」に更新（design ADR-3）。
+  - `docs/BACKLOG.md` feat-012 を **Closed** に更新（実測 PSNR 32.96 を記載）＋判定基準に実測合格を追記。
+  - 本体「オリジナルコードの変更点」への追記なし（本体改変ゼロ）。requirements.lock.txt 再生成なし（新規ライブラリなし）。
+- **feat-012 クローズ完了。CP0〜CP4 すべて合格。**
+
+## 完了サマリ
+- **DyNeRF（実シーン・多視点）の学習〜評価が 4DGaussians 環境で正常動作することを確認**（cut_roasted_beef、PSNR 32.96 / 論文 33.85）。
+- これでロードマップの実シーン3系統のうち HyperNeRF（feat-009）・DyNeRF（feat-012）が完了。残るは multipleview（feat-013, Open）。

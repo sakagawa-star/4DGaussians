@@ -126,9 +126,9 @@
 | ID | Title | 概要 | 依存 | Status |
 |----|-------|------|------|--------|
 | ~~feat-010~~ | DyNeRF動作確認（**中止**） | feat-008 の COLMAP 3.12.6 が rig 非互換と判明し中止（2026-06-23）。調査資産（cut_roasted_beef データDL・フレーム抽出済、root cause 分析、requirements/design）は feat-012 が継承 | feat-008 | **中止（Cancelled, 2026-06-23）**。`docs/issues/feat-010-dynerf/` 参照 |
-| feat-012 | DyNeRF動作確認（再開） | 実シーン・多視点の1シーン（cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`、**COLMAP 3.11.1 を使用**）→ダウンサンプリング→学習→レンダリング→評価を動かす。feat-010（中止） の調査資産（データ・root cause・確定事項）を継承 | feat-011 | **In Progress**（2026-06-24 着手・案件フォルダ作成。要求仕様・設計はこれから） |
+| feat-012 | DyNeRF動作確認（再開） | 実シーン・多視点の1シーン（cut_roasted_beef）で、フレーム抽出（`preprocess_dynerf.py`）→COLMAP（`colmap.sh ... llff`、**COLMAP 3.11.1 を使用**）→ダウンサンプリング→学習→レンダリング→評価を動かす。feat-010（中止） の調査資産（データ・root cause・確定事項）を継承 | feat-011 | **Closed（2026-06-24）**。CP0〜CP4 完走。学習〜評価 動作確認（test PSNR 32.96 / 論文 33.85、6指標健全）。本体改変ゼロ。`docs/issues/feat-012-dynerf/` 参照 |
 
-**判定基準（案）**: 前処理3段（preprocess_dynerf.py / colmap.sh llff / downsample_point.py）が完走し、`train.py`→`render.py`→`metrics.py` が完走する。ffmpeg（imageio）依存に注意（`scene/dataset_readers.py:readdynerfInfo`、判定は poses_bounds.npy の存在）。**COLMAP は feat-011 で導入する 3.11.1 を使う**
+**判定基準**: 前処理3段（preprocess_dynerf.py / colmap.sh llff / downsample_point.py）が完走し、`train.py`→`render.py`→`metrics.py` が完走する。ffmpeg（imageio）依存に注意（`scene/dataset_readers.py:readdynerfInfo`、判定は poses_bounds.npy の存在）。**COLMAP は feat-011 で導入する 3.11.1 を使う**。**実測合格（2026-06-24）**: 前処理は feat-011 で実証済み・学習〜評価3経路すべて exit0 完走、test PSNR 32.96（6指標健全）。
 
 ### Phase 10: multipleview動作確認（多視点・カスタム）
 
