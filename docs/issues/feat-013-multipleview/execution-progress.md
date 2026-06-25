@@ -18,7 +18,7 @@
 | CP0 | 準備（GPU/ポート確定・LLFF clone・依存確認・scratch作成） | 確定パラメータ | ✅ 完了 2026-06-25 |
 | CP1 | データ再編成（FR-001） | `data/multipleview/cut_roasted_beef/camNN/frame_XXXXX.jpg` | ✅ 完了 2026-06-25 |
 | CP2 | COLMAP+LLFF 前処理（FR-002） | sparse_・points3D_multipleview.ply・poses_bounds_multipleview.npy | ✅ 完了 2026-06-25 |
-| CP3 | config作成＋学習（FR-003） | `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` | ⏳ 未着手 |
+| CP3 | config作成＋学習（FR-003） | `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` | ✅ 完了 2026-06-25 |
 | CP4 | レンダリング（FR-004、--skip_video） | `test/ours_XXXXX/{renders,gt}` | ⏳ 未着手 |
 | CP5 | 評価（FR-005） | results.json・per_view.json | ⏳ 未着手 |
 | CP6 | 文書化・クローズ（FR-006） | CLAUDE.md/BACKLOG/台帳 | ⏳ 未着手 |
@@ -47,6 +47,13 @@
 - ⑤ LLFF `imgs2poses.py`（事前clone・py3互換OK・GPU不要）: `poses_bounds.npy` 生成 → `poses_bounds_multipleview.npy`（**shape=(20,17)**）。Cameras5/Images20/Points(4718,3)。
 - 成果物検証通過: sparse_/{cameras,images}.bin（20画像・imageN.jpg形式）・points3D_multipleview.ply 36,357点・poses_bounds (20,17)。`colmap_tmp` 掃除済み。
 
+## CP3 結果（2026-06-25）
+
+- config `arguments/multipleview/cut_roasted_beef.py` を `default.py` 複製で作成（iterations=15000・coarse3000・kplanes [64,64,64,150]）。
+- 学習（GPU0・port6017・MPL環境変数・バックグラウンド＋ログ）: exit0、`Training complete.`（15:33→15:56、約23分）。例外/nan なし。
+- 学習中eval（健全）: [ITER3000] train PSNR 30.00 / [ITER7000] test 30.06・train 31.01 / **[ITER14000] test 31.24・train 32.68**。
+- 成果物: `point_cloud/iteration_14000/` に point_cloud.ply(45M)・deformation.pth(9.9M)・deformation_table.pth・deformation_accum.pth。保存 iteration は feat-012 と同機構（`save_iterations` 最小14000、fine段階で到達。15000は未保存）。
+
 ## 次アクション
 
-- **CP3（config作成＋学習）**: `arguments/multipleview/cut_roasted_beef.py`（default.py複製）を作成 → design §5.1 の train.py（GPU0・port6017・MPL環境変数）をバックグラウンド＋ログで実行。完了後 `output/multipleview/cut_roasted_beef/point_cloud/iteration_XXXXX/` を確認。
+- **CP4（レンダリング）**: design §5.2 の render.py（`--skip_train --skip_video`、GPU0・MPL環境変数）を実行。完了後 `test/ours_14000/{renders,gt}` の生成・ファイル名集合一致を確認。
